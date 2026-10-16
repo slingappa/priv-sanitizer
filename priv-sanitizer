@@ -11,6 +11,35 @@ if [[ -f "${ROOT_DIR}/scripts/activate.sh" ]]; then
   source "${ROOT_DIR}/scripts/activate.sh" >/dev/null
 fi
 
+DOCKER_MODE="${PRIV_SANITIZER_USE_DOCKER:-auto}"
+DOCKER_RUNTIME_FILE="${ROOT_DIR}/.docker-runtime"
+if [[ "$DOCKER_MODE" == "1" || ( "$DOCKER_MODE" == "auto" && -f "$DOCKER_RUNTIME_FILE" ) ]]; then
+  command -v docker >/dev/null 2>&1 || {
+    printf '[priv-sanitizer] ERROR: Docker runtime is enabled but Docker is unavailable. Set PRIV_SANITIZER_USE_DOCKER=0 to use local Python.\n' >&2
+    exit 1
+  }
+  if [[ -f "$DOCKER_RUNTIME_FILE" ]]; then
+    DOCKER_IMAGE="$(head -n 1 "$DOCKER_RUNTIME_FILE")"
+  else
+    DOCKER_IMAGE="${PRIV_SANITIZER_DOCKER_IMAGE:-priv-sanitizer:local}"
+  fi
+  [[ -n "$DOCKER_IMAGE" ]] || {
+    printf '[priv-sanitizer] ERROR: Docker image tag is empty.\n' >&2
+    exit 1
+  }
+  docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 || {
+    printf '[priv-sanitizer] ERROR: Docker image %s is unavailable; run scripts/install.sh --docker.\n' "$DOCKER_IMAGE" >&2
+    exit 1
+  }
+  DOCKER_ARGS=(run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/work" --workdir /work)
+  for ENV_NAME in PRIV_SANITIZER_FFMPEG_THREADS PRIV_SANITIZER_X264_PRESET PRIV_SANITIZER_QUIET; do
+    if [[ -n "${!ENV_NAME:-}" ]]; then
+      DOCKER_ARGS+=(--env "$ENV_NAME=${!ENV_NAME}")
+    fi
+  done
+  exec docker "${DOCKER_ARGS[@]}" "$DOCKER_IMAGE" "$@"
+fi
+
 PYTHON_BIN="${PRIV_SANITIZER_PYTHON:-${PRIV_SANITIZER_VENV:-${ROOT_DIR}/.venv}/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="$(command -v python3 || true)"

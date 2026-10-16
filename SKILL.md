@@ -22,10 +22,10 @@ discovers the supported videos in that folder and writes a two-pass batch under
 `outputs_sanitized/`:
 
 ```bash
-TOOL_DIR="${PRIV_SANITIZER_ROOT:-$PWD}"
-VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-cd "$VIDEO_DIR"
-"$TOOL_DIR/priv-sanitizer"
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+video_dir="${VIDEO_DIR:-$PWD}"
+cd "$video_dir"
+"$tool_root/priv-sanitizer"
 # equivalent: python3 -m priv_sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts
 ```
 
@@ -38,6 +38,9 @@ required for baseline processing and is not rewritten or emitted.
 For a new machine, run `bash scripts/install.sh` and then
 `source scripts/activate.sh` first. The installer provisions the Python
 environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision dependencies.
+For a Docker-only setup that avoids host Python dependencies, run
+`bash scripts/install.sh --docker-only`; the repository launcher then uses the
+configured image automatically.
 
 The workflow has two passes:
 

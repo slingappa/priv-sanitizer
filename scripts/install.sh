@@ -10,6 +10,9 @@ VENV_DIR="${PRIV_SANITIZER_VENV:-${ROOT_DIR}/.venv}"
 DRY_RUN=0
 NO_SYSTEM_PACKAGES=0
 SKIP_VISION=0
+SETUP_DOCKER=0
+DOCKER_ONLY=0
+DOCKER_IMAGE="${PRIV_SANITIZER_DOCKER_IMAGE:-priv-sanitizer:local}"
 
 usage() {
   cat <<'EOF'
@@ -19,6 +22,9 @@ Options:
   --dry-run              Print actions without changing the system.
   --no-system-packages  Do not use apt or local system-tool extraction; require tools on PATH.
   --skip-vision         Install the CLI/Pillow stack without OCR/face extras.
+  --docker              Build the optional Docker runtime and make the launcher use it.
+  --docker-only         Build Docker runtime without installing host Python packages.
+  --docker-image NAME   Docker image tag (default: priv-sanitizer:local).
   --venv PATH           Use PATH instead of .venv.
   -h, --help            Show this help.
 EOF
@@ -132,6 +138,11 @@ while (($#)); do
     --dry-run) DRY_RUN=1; shift ;;
     --no-system-packages) NO_SYSTEM_PACKAGES=1; shift ;;
     --skip-vision) SKIP_VISION=1; shift ;;
+    --docker) SETUP_DOCKER=1; shift ;;
+    --docker-only) SETUP_DOCKER=1; DOCKER_ONLY=1; shift ;;
+    --docker-image)
+      (($# >= 2)) || die "--docker-image requires an image tag"
+      DOCKER_IMAGE="$2"; shift 2 ;;
     --venv)
       (($# >= 2)) || die "--venv requires a path"
       VENV_DIR="$2"; shift 2 ;;
@@ -139,6 +150,24 @@ while (($#)); do
     *) die "unknown option: $1" ;;
   esac
 done
+
+if (( SETUP_DOCKER && SKIP_VISION && !DOCKER_ONLY )); then
+  die "--docker requires the vision runtime; remove --skip-vision"
+fi
+
+if (( DOCKER_ONLY )); then
+  has_command docker || die "Docker CLI was not found; install Docker or omit --docker-only"
+  if (( DRY_RUN )); then
+    printf '+ docker build -t %q %q\n' "$DOCKER_IMAGE" "$ROOT_DIR"
+    say "Docker-only dry run complete. No files or packages were changed."
+    exit 0
+  fi
+  say "Building Docker image: $DOCKER_IMAGE"
+  docker build -t "$DOCKER_IMAGE" "$ROOT_DIR"
+  printf '%s\n' "$DOCKER_IMAGE" > "$ROOT_DIR/.docker-runtime"
+  say "Docker runtime enabled for the repository launcher."
+  exit 0
+fi
 
 install_system_packages
 
@@ -162,6 +191,9 @@ if (( ! DRY_RUN )); then
 fi
 
 if (( DRY_RUN )); then
+  if (( SETUP_DOCKER )); then
+    printf '+ docker build -t %q %q\n' "$DOCKER_IMAGE" "$ROOT_DIR"
+  fi
   say "Dry run complete. No files or packages were changed."
   exit 0
 fi
@@ -172,6 +204,18 @@ tool_available ffprobe || die "ffprobe is still unavailable after installation"
 if ! (( SKIP_VISION )); then
   has_command tesseract || configure_local_tesseract || die "tesseract is still unavailable after installation"
   "$VENV_DIR/bin/python" -c 'import cv2, pytesseract; assert hasattr(cv2, "CascadeClassifier"), "OpenCV build lacks CascadeClassifier"; print("vision backends:", cv2.__version__, pytesseract.get_tesseract_version())'
+fi
+
+if (( SETUP_DOCKER )); then
+  has_command docker || die "Docker CLI was not found; install Docker or omit --docker"
+  if (( DRY_RUN )); then
+    printf '+ docker build -t %q %q\n' "$DOCKER_IMAGE" "$ROOT_DIR"
+  else
+    say "Building Docker image: $DOCKER_IMAGE"
+    docker build -t "$DOCKER_IMAGE" "$ROOT_DIR"
+    printf '%s\n' "$DOCKER_IMAGE" > "$ROOT_DIR/.docker-runtime"
+    say "Docker runtime enabled for the repository launcher."
+  fi
 fi
 
 say "Installation complete. Run:"

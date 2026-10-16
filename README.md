@@ -9,15 +9,14 @@ the recordings are stored elsewhere.
 
 ```bash
 export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-export TOOL_DIR="${TOOL_DIR:-$HOME/tools/priv-sanitizer}"
 
-git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
-cd "$TOOL_DIR"
+git clone https://github.com/slingappa/priv-sanitizer.git "$HOME/tools/priv-sanitizer"
+cd "$HOME/tools/priv-sanitizer"
 bash scripts/install.sh
 source scripts/activate.sh
 
 cd "$VIDEO_DIR"
-"$PRIV_SANITIZER_ROOT/priv-sanitizer"
+"$HOME/tools/priv-sanitizer/priv-sanitizer"
 ```
 
 The no-argument batch run discovers videos in `VIDEO_DIR`. Final sanitized
@@ -31,6 +30,49 @@ priv-sanitizer --help
 priv-sanitizer batch --help
 ```
 
+For a Docker-only installation, skip host Python setup and let the installer
+build the image and configure the launcher to use it:
+
+```bash
+cd "$HOME/tools/priv-sanitizer"
+bash scripts/install.sh --docker-only
+cd "$VIDEO_DIR"
+"$HOME/tools/priv-sanitizer/priv-sanitizer"
+```
+
+Use `PRIV_SANITIZER_USE_DOCKER=0` before a launcher invocation to temporarily
+force the local Python runtime, or `PRIV_SANITIZER_USE_DOCKER=1` to require the
+configured Docker image.
+
+## Docker quick start
+
+Docker packages Python, FFmpeg, Tesseract, OpenCV, and the sanitizer runtime
+into one image. The recommended setup is `bash scripts/install.sh
+--docker-only`; to build manually instead:
+
+```bash
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+cd "$tool_root"
+docker build -t priv-sanitizer:local .
+```
+
+Run it from the folder containing the videos:
+
+```bash
+export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume "$VIDEO_DIR:/work" \
+  --workdir /work \
+  priv-sanitizer:local
+```
+
+The container uses the same no-argument batch behavior: final videos are
+written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
+`VIDEO_DIR/artifacts/`. Audio remains preserved by default. To enable
+experimental transcript-based audio muting, append
+`--experimental-audio` to the `docker run` command.
+
 ## Baseline
 
 ### Installation
@@ -39,8 +81,8 @@ On Debian/Ubuntu, install the complete runtime—including FFmpeg, FFprobe,
 Tesseract OCR, OpenCV, and the Python environment—with:
 
 ```bash
-TOOL_DIR="${PRIV_SANITIZER_ROOT:-$PWD}"
-cd "$TOOL_DIR"
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+cd "$tool_root"
 bash scripts/install.sh
 source scripts/activate.sh
 ```
@@ -49,11 +91,11 @@ After installation, use the repository-local launcher to avoid repeating the
 Python module invocation:
 
 ```bash
-TOOL_DIR="${PRIV_SANITIZER_ROOT:-$PWD}"
-VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-"$TOOL_DIR/priv-sanitizer" --help
-cd "$VIDEO_DIR"
-"$TOOL_DIR/priv-sanitizer"
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+video_dir="${VIDEO_DIR:-$PWD}"
+"$tool_root/priv-sanitizer" --help
+cd "$video_dir"
+"$tool_root/priv-sanitizer"
 ```
 
 It automatically uses the project virtual environment and local
@@ -87,10 +129,10 @@ From a folder containing videos and optional same-stem transcripts, run the
 launcher with no arguments:
 
 ```bash
-TOOL_DIR="${PRIV_SANITIZER_ROOT:-$PWD}"
-VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-cd "$VIDEO_DIR"
-"$TOOL_DIR/priv-sanitizer"
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+video_dir="${VIDEO_DIR:-$PWD}"
+cd "$video_dir"
+"$tool_root/priv-sanitizer"
 ```
 
 This is equivalent to `python3 -m priv_sanitizer batch --input . --output

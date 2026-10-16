@@ -1,6 +1,7 @@
 # Local runtimes and downloaded tools
 .venv/
 .tools/
+.docker-runtime
 
 # Python build/cache files
 __pycache__/

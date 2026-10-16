@@ -2,13 +2,17 @@
 
 ## Folder batch
 
+For a Docker-only installation, run `bash scripts/install.sh --docker-only`
+once. The repository launcher automatically uses the resulting image for later
+runs. Set `PRIV_SANITIZER_USE_DOCKER=0` to use local Python temporarily.
+
 From a directory containing recordings and optional same-stem transcripts:
 
 ```bash
-TOOL_DIR="${PRIV_SANITIZER_ROOT:-$PWD}"
-VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-cd "$VIDEO_DIR"
-"$TOOL_DIR/priv-sanitizer"
+tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+video_dir="${VIDEO_DIR:-$PWD}"
+cd "$video_dir"
+"$tool_root/priv-sanitizer"
 ```
 
 With no command arguments, the launcher scans only the current directory and
