@@ -2,6 +2,35 @@
 
 Local-first meeting-video privacy sanitizer with a video-only baseline pass and an optional transcript-assisted hardening pass.
 
+## Quick start
+
+Run these commands from the folder containing the videos. Set `VIDEO_DIR` if
+the recordings are stored elsewhere.
+
+```bash
+export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
+export TOOL_DIR="${TOOL_DIR:-$HOME/tools/priv-sanitizer}"
+
+git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
+cd "$TOOL_DIR"
+bash scripts/install.sh
+source scripts/activate.sh
+
+cd "$VIDEO_DIR"
+"$PRIV_SANITIZER_ROOT/priv-sanitizer"
+```
+
+The no-argument batch run discovers videos in `VIDEO_DIR`. Final sanitized
+files are written to `VIDEO_DIR/outputs_sanitized/`; audit manifests, reports,
+and intermediate pass outputs are written to `VIDEO_DIR/artifacts/`.
+
+For usage examples after installation:
+
+```bash
+priv-sanitizer --help
+priv-sanitizer batch --help
+```
+
 ## Baseline
 
 ### Installation
