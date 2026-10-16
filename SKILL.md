@@ -42,12 +42,15 @@ environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision dependencies.
 The workflow has two passes:
 
 1. Baseline: video-only input. Preserve audio by default, blur participant visuals, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
-2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it only as secondary evidence for names, speaker labels, and timing, then mute only short matched name windows. Do not rewrite or emit a sanitized transcript.
+2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it as secondary evidence for names, speaker labels, and timing. Audio remains unchanged by default; `--experimental-audio` explicitly opts in to short matched-name mute windows. Do not rewrite or emit a sanitized transcript.
 
 The detector stack records local layout-model evidence, OCR evidence (Tesseract
 when installed), and face-detection evidence (OpenCV Haar when installed).
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
+
+Audio redaction is experimental and off by default. Enable it explicitly with
+`--experimental-audio` for `batch` or `harden`; otherwise audio is preserved.
 
 Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Set
 `PRIV_SANITIZER_FFMPEG_THREADS` or `PRIV_SANITIZER_X264_PRESET` to override

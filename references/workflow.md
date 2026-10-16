@@ -24,6 +24,9 @@ per-pass audit artifacts are stored under `artifacts/<video-stem>/`, the flat
 final video is `outputs_sanitized/<video-stem>.mp4`, and the batch summary is
 `artifacts/batch-report.json`.
 
+Audio is preserved by default. To opt in to experimental transcript-based name
+muting, add `--experimental-audio` to the batch command.
+
 ## Baseline
 
 ```bash
@@ -38,5 +41,8 @@ priv-sanitizer harden output/baseline/job \
   --job output/hardened/job
 priv-sanitizer render output/hardened/job --output output/hardened
 ```
+
+For experimental audio muting, add `--experimental-audio` to the `harden`
+command before rendering.
 
 Review `redaction-manifest.json`, `report.txt`, and `analysis.json` before distributing the output.

@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
   PRIV_SANITIZER_FFMPEG_THREADS=4 \\
   PRIV_SANITIZER_X264_PRESET=veryfast \\
   priv-sanitizer batch --input "$VIDEO_DIR"
+
+  # Opt in to experimental transcript-based audio name muting.
+  priv-sanitizer batch --input "$VIDEO_DIR" --experimental-audio
 """
     parser = argparse.ArgumentParser(
         prog="priv-sanitizer",
@@ -55,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         input=Path.cwd(),
         output=Path.cwd() / "outputs_sanitized",
         artifacts=None,
+        experimental_audio=False,
         every=4.0,
     )
 
@@ -70,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     batch_cmd.add_argument(
         "--artifacts", type=Path, default=None,
         help="audit directory (default: sibling ./artifacts directory)",
+    )
+    batch_cmd.add_argument(
+        "--experimental-audio", "--experimental-audio-redaction",
+        action="store_true", dest="experimental_audio", default=False,
+        help="EXPERIMENTAL: mute transcript-matched spoken-name windows",
     )
     batch_cmd.add_argument("--every", type=float, default=4.0)
 
@@ -98,8 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to subtract from transcript timestamps (needed for extracted clips)",
     )
     harden_cmd.add_argument(
-        "--no-audio-redaction", action="store_false", dest="narrow_audio", default=True,
-        help="keep audio unchanged after transcript analysis",
+        "--experimental-audio", "--experimental-audio-redaction",
+        action="store_true", dest="narrow_audio", default=False,
+        help="EXPERIMENTAL: mute transcript-matched spoken-name windows",
+    )
+    harden_cmd.add_argument(
+        "--no-audio-redaction", action="store_false", dest="narrow_audio",
+        help=argparse.SUPPRESS,
     )
 
     render = sub.add_parser("render", help="render a job manifest")
@@ -120,7 +134,13 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "batch":
             print(json.dumps(
-                batch(args.input, args.output, artifacts_dir=args.artifacts, every=args.every),
+                batch(
+                    args.input,
+                    args.output,
+                    artifacts_dir=args.artifacts,
+                    experimental_audio=args.experimental_audio,
+                    every=args.every,
+                ),
                 indent=2,
             ))
         elif args.command == "inspect":

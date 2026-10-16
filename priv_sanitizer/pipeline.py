@@ -158,7 +158,7 @@ def harden(
     transcript: Path,
     output_job: Path,
     *,
-    narrow_audio: bool = True,
+    narrow_audio: bool = False,
     transcript_offset: float = 0.0,
 ) -> dict[str, Any]:
     base = read_json(baseline_job / "redaction-manifest.json")
@@ -196,6 +196,7 @@ def harden(
         "participant_name_count": len(transcript_data["names"]),
         "candidate_audio_interval_count": len(candidate_audio),
         "time_offset": transcript_offset,
+        "experimental_audio_redaction_requested": narrow_audio,
     }
     warnings: list[str] = []
     if candidate_audio and narrow_audio:
@@ -276,6 +277,7 @@ def batch(
     output_dir: Path,
     *,
     artifacts_dir: Path | None = None,
+    experimental_audio: bool = False,
     every: float = 4.0,
 ) -> dict[str, Any]:
     """Run baseline plus optional transcript hardening for every local video."""
@@ -306,6 +308,7 @@ def batch(
             "source": str(video),
             "output_key": output_key,
             "transcript": str(transcript) if transcript else None,
+            "experimental_audio_redaction": experimental_audio,
             "warnings": pairing_warnings.copy(),
             "baseline": {"status": "pending"},
             "hardened": {"status": "skipped", "reason": "no matching transcript"},
@@ -332,7 +335,7 @@ def batch(
                         baseline_job,
                         transcript,
                         hardened_job,
-                        narrow_audio=True,
+                        narrow_audio=experimental_audio,
                         transcript_offset=0.0,
                     )
                     hardened_render = render_job(hardened_job, hardened_dir)
@@ -370,6 +373,7 @@ def batch(
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
+        "experimental_audio_redaction": experimental_audio,
         "video_count": len(videos),
         "completed_count": sum(item.get("status") == "completed" for item in results),
         "failed_count": sum(item.get("status") == "failed" for item in results),

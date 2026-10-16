@@ -98,7 +98,8 @@ This is equivalent to `python3 -m priv_sanitizer batch --input . --output
 `.webm`, and `.m4v` files. Each video receives a video-only baseline pass. If
 there is an unambiguous same-stem `.docx`, `.srt`, or `.vtt` transcript, the
 optional hardening pass runs afterward and becomes the selected final output.
-Missing or ambiguous transcripts do not block baseline processing.
+Missing or ambiguous transcripts do not block baseline processing. Audio is
+preserved by default, including when transcript hardening runs.
 
 Final files are written directly as `outputs_sanitized/<video-stem>.mp4`.
 Detailed artifacts are under `artifacts/<video-stem>/`, with `baseline/`,
@@ -129,10 +130,13 @@ python3 -m priv_sanitizer render "$VIDEO_DIR/artifacts/input-hardened/job" \
   --output "$VIDEO_DIR/artifacts/input-hardened"
 ```
 
-The transcript is secondary evidence only. It is not rewritten or emitted. The
-hardening pass creates short, review-required mute windows around transcript
-name matches; it does not mute all speech in a cue. For an extracted clip,
-pass the source timestamp offset with `--transcript-offset`.
+The transcript is secondary evidence only. It is not rewritten or emitted. By
+default, hardening uses transcript evidence for analysis and keeps audio
+unchanged. To opt in to experimental short, review-required mute windows
+around transcript name matches, add `--experimental-audio` to the batch
+command or pass `--experimental-audio` to `harden`. It does not mute all speech
+in a cue. For an extracted clip, pass the source timestamp offset with
+`--transcript-offset`.
 
 FFmpeg and FFprobe must be available on `PATH` or configured explicitly. Pillow is required. OCR uses
 `pytesseract` plus the `tesseract` executable when installed; face detection
