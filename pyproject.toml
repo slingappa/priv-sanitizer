@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "priv-sanitizer"
+version = "0.1.0"
+description = "Local-first privacy sanitization for meeting recordings"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=9.0"]
+
+[project.optional-dependencies]
+vision = [
+  "opencv-python-headless==4.10.0.84",
+  "pytesseract>=0.3.10",
+]
+
+[project.scripts]
+priv-sanitizer = "priv_sanitizer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

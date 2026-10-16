@@ -1,0 +1,3 @@
+interface:
+  display_name: "Priv Sanitizer"
+  short_description: "Sanitize meeting video privacy locally"

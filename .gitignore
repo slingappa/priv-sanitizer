@@ -1,0 +1,27 @@
+# Local runtimes and downloaded tools
+.venv/
+.tools/
+
+# Python build/cache files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Generated sanitizer outputs and audit data
+outputs/
+outputs_sanitized/
+artifacts/
+sample_outputs/
+
+# Local media and transcript inputs
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
+*.docx
+*.srt
+*.vtt

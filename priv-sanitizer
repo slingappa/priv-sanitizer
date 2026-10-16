@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Repository-local launcher. Keep the caller's working directory intact so
+# `./priv-sanitizer` with no arguments batches videos in that folder.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Reuse the same local FFmpeg/Tesseract setup as the documented runtime.
+if [[ -f "${ROOT_DIR}/scripts/activate.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "${ROOT_DIR}/scripts/activate.sh" >/dev/null
+fi
+
+PYTHON_BIN="${PRIV_SANITIZER_PYTHON:-${PRIV_SANITIZER_VENV:-${ROOT_DIR}/.venv}/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+  printf '[priv-sanitizer] ERROR: Python 3 was not found; run scripts/install.sh first.\n' >&2
+  exit 1
+fi
+
+# Make the checkout importable when this launcher is called from a separate
+# recordings directory.
+export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# The launcher has a deliberately explicit no-argument contract: process all
+# videos in the caller's current directory and write the selected outputs to
+# that directory's outputs_sanitized/ folder.
+if (($# == 0)); then
+  exec "$PYTHON_BIN" -m priv_sanitizer batch \
+    --input "$PWD" \
+    --output "$PWD/outputs_sanitized" \
+    --artifacts "$PWD/artifacts"
+fi
+
+exec "$PYTHON_BIN" -m priv_sanitizer "$@"
