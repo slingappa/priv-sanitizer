@@ -4,7 +4,9 @@
 
 For a Docker-only installation, run `bash scripts/install.sh --docker-only`
 once. The repository launcher automatically uses the resulting image for later
-runs. Set `PRIV_SANITIZER_USE_DOCKER=0` to use local Python temporarily.
+runs. The explicit `priv-sanitizer-docker` wrapper is also available. Set
+`PRIV_SANITIZER_USE_DOCKER=0` to use local Python temporarily through the
+regular launcher.
 
 From a directory containing recordings and optional same-stem transcripts:
 

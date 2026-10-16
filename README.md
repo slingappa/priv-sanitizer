@@ -37,7 +37,7 @@ build the image and configure the launcher to use it:
 cd "$HOME/tools/priv-sanitizer"
 bash scripts/install.sh --docker-only
 cd "$VIDEO_DIR"
-"$HOME/tools/priv-sanitizer/priv-sanitizer"
+"$HOME/tools/priv-sanitizer/priv-sanitizer-docker"
 ```
 
 Use `PRIV_SANITIZER_USE_DOCKER=0` before a launcher invocation to temporarily
@@ -51,7 +51,8 @@ into one image. The recommended setup is `bash scripts/install.sh
 --docker-only`; to build manually instead:
 
 ```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
+tool_root="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
+video_dir="${VIDEO_DIR:-$PWD}"
 cd "$tool_root"
 docker build -t priv-sanitizer:local .
 ```
@@ -59,19 +60,20 @@ docker build -t priv-sanitizer:local .
 Run it from the folder containing the videos:
 
 ```bash
-export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --volume "$VIDEO_DIR:/work" \
-  --workdir /work \
-  priv-sanitizer:local
+tool_root="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
+video_dir="${VIDEO_DIR:-$PWD}"
+cd "$video_dir"
+"$tool_root/priv-sanitizer-docker"
 ```
 
-The container uses the same no-argument batch behavior: final videos are
-written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
-`VIDEO_DIR/artifacts/`. Audio remains preserved by default. To enable
-experimental transcript-based audio muting, append
-`--experimental-audio` to the `docker run` command.
+The Docker launcher uses the same no-argument batch behavior: final videos
+are written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
+`VIDEO_DIR/artifacts/`. Audio remains preserved by default. Add
+`--experimental-audio` to the launcher command to opt in to experimental
+transcript-based audio muting.
+
+The raw `docker run` form remains available for custom container workflows,
+but is not required for normal use.
 
 ## Baseline
 

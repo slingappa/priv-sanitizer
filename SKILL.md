@@ -17,6 +17,10 @@ The executable `./priv-sanitizer` in this directory is a shorter wrapper for
 the same CLI. It selects the project runtime automatically and forwards all
 arguments.
 
+The executable `./priv-sanitizer-docker` is the direct Docker wrapper. After
+`bash scripts/install.sh --docker-only`, call it from the recording folder to
+run the configured image without writing a `docker run` command.
+
 When launched with no arguments from a folder containing recordings, it
 discovers the supported videos in that folder and writes a two-pass batch under
 `outputs_sanitized/`:
@@ -40,7 +44,8 @@ For a new machine, run `bash scripts/install.sh` and then
 environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision dependencies.
 For a Docker-only setup that avoids host Python dependencies, run
 `bash scripts/install.sh --docker-only`; the repository launcher then uses the
-configured image automatically.
+configured image automatically. Use `priv-sanitizer-docker` when you want to
+explicitly select the Docker wrapper.
 
 The workflow has two passes:
 

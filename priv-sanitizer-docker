@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Direct Docker launcher. It keeps the caller's working directory as the
+# container workspace, so no-argument invocation batches that folder.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCKER_RUNTIME_FILE="${ROOT_DIR}/.docker-runtime"
+
+command -v docker >/dev/null 2>&1 || {
+  printf '[priv-sanitizer-docker] ERROR: Docker was not found on PATH.\n' >&2
+  exit 1
+}
+
+if [[ -f "$DOCKER_RUNTIME_FILE" ]]; then
+  DOCKER_IMAGE="$(head -n 1 "$DOCKER_RUNTIME_FILE")"
+else
+  DOCKER_IMAGE="${PRIV_SANITIZER_DOCKER_IMAGE:-priv-sanitizer:local}"
+fi
+
+[[ -n "$DOCKER_IMAGE" ]] || {
+  printf '[priv-sanitizer-docker] ERROR: Docker image tag is empty.\n' >&2
+  exit 1
+}
+
+docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 || {
+  printf '[priv-sanitizer-docker] ERROR: image %s is unavailable. Run:\n' "$DOCKER_IMAGE" >&2
+  printf '  cd %q && bash scripts/install.sh --docker-only\n' "$ROOT_DIR" >&2
+  exit 1
+}
+
+DOCKER_ARGS=(
+  run --rm
+  --user "$(id -u):$(id -g)"
+  --volume "$PWD:/work"
+  --workdir /work
+)
+
+for ENV_NAME in PRIV_SANITIZER_FFMPEG_THREADS PRIV_SANITIZER_X264_PRESET PRIV_SANITIZER_QUIET; do
+  if [[ -n "${!ENV_NAME:-}" ]]; then
+    DOCKER_ARGS+=(--env "$ENV_NAME=${!ENV_NAME}")
+  fi
+done
+
+exec docker "${DOCKER_ARGS[@]}" "$DOCKER_IMAGE" "$@"
