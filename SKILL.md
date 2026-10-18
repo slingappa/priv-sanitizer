@@ -68,8 +68,9 @@ Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Set
 `PRIV_SANITIZER_FFMPEG_THREADS` or `PRIV_SANITIZER_X264_PRESET` to override
 those defaults.
 
-For long conversions, pass `-v`/`--verbose`. Diagnostics and periodic
-heartbeats are written to `verbose.log` in the caller's working directory;
+Diagnostics and periodic heartbeats are enabled by default and written to
+`verbose.log` in the caller's working directory. `-v`/`--verbose` explicitly
+forces this mode, `PRIV_SANITIZER_VERBOSE=0` disables it, and
 `PRIV_SANITIZER_HEARTBEAT_SECONDS` controls the heartbeat interval.
 
 For staged work, read [references/workflow.md](references/workflow.md). For privacy decisions, read [references/policy.md](references/policy.md).

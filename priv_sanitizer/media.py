@@ -57,9 +57,10 @@ def _status(message: str) -> None:
 
 
 def _verbose_enabled() -> bool:
+    configured = os.environ.get("PRIV_SANITIZER_VERBOSE", "1").lower()
     return (
         os.environ.get("PRIV_SANITIZER_QUIET") != "1"
-        and os.environ.get("PRIV_SANITIZER_VERBOSE", "").lower() in {"1", "true", "yes", "on"}
+        and configured not in {"0", "false", "no", "off"}
     )
 
 

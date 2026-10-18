@@ -72,10 +72,12 @@ are written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
 `--experimental-audio` to the launcher command to opt in to experimental
 transcript-based audio muting.
 
-For long conversions, add `-v` (or `--verbose`). This writes detailed command,
-stage, percentage, and heartbeat diagnostics to `VIDEO_DIR/verbose.log` while
-also showing them on stderr. Heartbeats default to every 15 seconds; override
-that with `PRIV_SANITIZER_HEARTBEAT_SECONDS`.
+Detailed command, stage, percentage, and heartbeat diagnostics are enabled by
+default and written to `VIDEO_DIR/verbose.log` while also showing on stderr.
+`-v` (or `--verbose`) explicitly forces the same mode. Heartbeats default to
+every 15 seconds; override that with `PRIV_SANITIZER_HEARTBEAT_SECONDS`.
+Set `PRIV_SANITIZER_VERBOSE=0` to disable the log, or
+`PRIV_SANITIZER_QUIET=1` to suppress diagnostics entirely.
 
 ```bash
 PRIV_SANITIZER_HEARTBEAT_SECONDS=5 \
@@ -134,9 +136,9 @@ python3 -m priv_sanitizer sanitize \
 
 The CLI reports progress for frame sampling, optional audio analysis, and video
 rendering. Audio analysis is skipped by default when audio is preserved, which
-avoids an unnecessary full-length decode on long recordings. Add
-`-v`/`--verbose` to write detailed diagnostics to
-`verbose.log`; set `PRIV_SANITIZER_QUIET=1` to suppress progress messages.
+avoids an unnecessary full-length decode on long recordings. Detailed
+diagnostics are logged by default; `-v`/`--verbose` explicitly enables them,
+while `PRIV_SANITIZER_VERBOSE=0` disables the log.
 The default verification still checks audio-stream presence and duration; full
 audio-level verification is included only when audio analysis is enabled.
 
