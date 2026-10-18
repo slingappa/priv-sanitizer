@@ -28,7 +28,7 @@ def _directory(value: str) -> Path:
 def _add_verbose_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
-        help="emit FFmpeg commands and periodic heartbeats for long-running stages",
+        help="enable detailed diagnostics (written to verbose.log)",
     )
 
 
@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="emit FFmpeg commands and periodic heartbeats for long-running stages",
+        help="enable detailed diagnostics (written to verbose.log)",
     )
     parser.add_argument(
         "-q", "--quiet", action="store_true",

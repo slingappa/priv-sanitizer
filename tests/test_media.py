@@ -1,4 +1,7 @@
 from pathlib import Path
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
@@ -9,6 +12,7 @@ from priv_sanitizer.media import (
     detect_face_regions,
     detect_layout_regions,
     detect_ocr_regions,
+    _verbose,
 )
 
 
@@ -140,6 +144,21 @@ def test_sample_entries_use_sidecar_and_preserve_source_zero(tmp_path):
     entries = _sample_entries([first, second], 8.0)
     assert entries[0][1:] == (0.0, 0.0, 2.0)
     assert entries[1][1:] == (4.0, 2.0, 8.0)
+
+
+def test_verbose_details_are_log_only(tmp_path):
+    log = tmp_path / "verbose.log"
+    stdout = StringIO()
+    stderr = StringIO()
+    with patch.dict(os.environ, {
+        "PRIV_SANITIZER_VERBOSE": "1",
+        "PRIV_SANITIZER_QUIET": "0",
+        "PRIV_SANITIZER_VERBOSE_LOG": str(log),
+    }), redirect_stdout(stdout), redirect_stderr(stderr):
+        _verbose("command details")
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+    assert "verbose: command details" in log.read_text(encoding="utf-8")
 
 
 def test_layout_detection_is_temporal_not_global(tmp_path):

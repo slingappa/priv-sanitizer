@@ -73,7 +73,8 @@ are written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
 transcript-based audio muting.
 
 Detailed command, stage, percentage, and heartbeat diagnostics are enabled by
-default and written to `VIDEO_DIR/verbose.log` while also showing on stderr.
+default and written to `VIDEO_DIR/verbose.log`; detailed FFmpeg command lines
+and heartbeat messages are not printed to the terminal.
 `-v` (or `--verbose`) explicitly forces the same mode. Heartbeats default to
 every 15 seconds; override that with `PRIV_SANITIZER_HEARTBEAT_SECONDS`.
 Set `PRIV_SANITIZER_VERBOSE=0` to disable the log, or

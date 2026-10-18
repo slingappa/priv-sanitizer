@@ -87,7 +87,9 @@ def _verbose_log(message: str) -> None:
 def _verbose(message: str) -> None:
     if _verbose_enabled():
         rendered = f"verbose: {message}"
-        print(f"[priv-sanitizer] {rendered}", file=os.sys.stderr, flush=True)
+        # Detailed commands and heartbeat text are intentionally log-only.
+        # Keep terminal output limited to concise stage/progress status so a
+        # long filter graph cannot flood stdout/stderr.
         _verbose_log(rendered)
 
 
