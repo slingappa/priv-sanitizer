@@ -12,6 +12,7 @@ from priv_sanitizer.media import (
     detect_face_regions,
     detect_layout_regions,
     detect_ocr_regions,
+    sample_frames,
     _verbose,
 )
 
@@ -144,6 +145,27 @@ def test_sample_entries_use_sidecar_and_preserve_source_zero(tmp_path):
     entries = _sample_entries([first, second], 8.0)
     assert entries[0][1:] == (0.0, 0.0, 2.0)
     assert entries[1][1:] == (4.0, 2.0, 8.0)
+
+
+def test_sample_frames_drops_duplicate_periodic_source_zero(tmp_path):
+    def fake_run(args, **kwargs):
+        output = Path(args[-1])
+        if "select=eq(n\\,0)" in args:
+            output.write_bytes(b"first")
+        else:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            # fps=1/4 emits source-time-zero and the t=4 frame.  The first
+            # periodic image must be discarded because frame zero is already
+            # decoded explicitly by sample_frames().
+            for index in (1, 2):
+                output.parent.joinpath(f"periodic-{index:06d}.jpg").write_bytes(b"periodic")
+
+    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+        frames = sample_frames(Path("input.mp4"), tmp_path, every=4.0, duration=8.0)
+
+    assert [path.name for path in frames] == ["frame-000000.jpg", "frame-000001.jpg"]
+    timestamps = __import__("json").loads((tmp_path / "frame-timestamps.json").read_text())
+    assert timestamps == {"frame-000000.jpg": 0.0, "frame-000001.jpg": 4.0}
 
 
 def test_verbose_details_are_log_only(tmp_path):

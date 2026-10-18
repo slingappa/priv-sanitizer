@@ -256,11 +256,10 @@ def sample_frames(
     video: Path, output_dir: Path, every: float = 4.0, duration: float | None = None
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    # FFmpeg's fps filter can rebase the first selected PTS on recordings
-    # whose first decoded packet is not the presentation frame at t=0.  That
-    # is harmless for thumbnailing, but unsafe for privacy redaction: the
-    # first participant can be visible before the first periodic sample.  Keep
-    # an explicitly decoded source frame zero, then add the regular samples.
+    # FFmpeg's fps filter emits a frame at source time zero.  Decode frame zero
+    # explicitly as a privacy guard, then discard that duplicate periodic
+    # frame before assigning timestamps.  Keeping the duplicate while labeling
+    # it as t=every shifts every later layout boundary by one sampling period.
     for stale in [*output_dir.glob("frame-*.jpg"), *output_dir.glob("periodic-*.jpg")]:
         try:
             stale.unlink()
@@ -284,14 +283,24 @@ def sample_frames(
         "-q:v", "5", str(pattern),
     ], progress_stage="sampling frames", duration=duration)
     periodic = sorted(output_dir.glob("periodic-*.jpg"))
+    if periodic:
+        # The first periodic image is the same source-time-zero frame already
+        # stored above.  Do not relabel it as t=every; that would make a brief
+        # layout transition appear one interval later than it really occurs.
+        first_periodic = periodic.pop(0)
+        try:
+            first_periodic.unlink()
+        except OSError:
+            pass
     frames = [first]
     timestamps: dict[str, float] = {first.name: 0.0}
     for index, path in enumerate(periodic, start=1):
         target = output_dir / f"frame-{index:06d}.jpg"
         path.replace(target)
-        # The periodic filter is intentionally treated as a nominal sampler.
-        # Layout/name regions are expanded to the surrounding sample segment,
-        # so a small PTS offset cannot leave an unredacted gap.
+        # The periodic filter is treated as a nominal sampler.  Its first
+        # frame was discarded above, so this image really corresponds to the
+        # first interval boundary (t=every), subject only to normal decoder
+        # timestamp quantization.
         timestamps[target.name] = round(index * max(every, 0.25), 3)
         frames.append(target)
     timestamp_path.write_text(json.dumps(timestamps, indent=2) + "\n", encoding="utf-8")
