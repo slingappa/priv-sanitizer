@@ -186,11 +186,18 @@ usage above 100% in the shell's `time` output confirms parallel execution;
 actual utilization may be limited by the container CPU quota, filters, or
 storage bandwidth.
 
-It detects a conservative participant-panel region and runs local layout/OCR/face detectors when available. Audio is preserved by default and audio
-analysis is skipped unless `--experimental-audio`, a non-preserve audio mode,
+It detects participant regions per sampled time segment rather than assuming a
+permanent right-side rail. Full-screen speaker/avatar views and faces in
+arbitrary grid/tile positions are scanned across the whole recording; the
+render manifest records their time-bounded boxes. Audio is preserved by default
+and audio analysis is skipped unless `--experimental-audio`, a non-preserve audio mode,
 or `PRIV_SANITIZER_AUDIO_ANALYSIS=1` is requested. When enabled, speech
 activity is recorded as evidence only and is never used to mute an entire
 meeting.
+
+Sampling always includes an explicit decode of the source's first frame before
+periodic samples, so a participant visible at `t=0` is covered by the first
+temporal redaction interval.
 
 ## Optional hardening
 
@@ -234,6 +241,6 @@ sudo apt-get install -y ffmpeg
 For the full local vision stack, install the Python extras with
 `pip install -e '.[vision]'` and install the system Tesseract language data
 separately. The tool still runs without those extras using its auditable local
-layout detector and participant-panel blur fallback.
+temporal layout detector and conservative full-frame/participant-tile fallback.
 
 Review `redaction-manifest.json`, `analysis.json`, and `report.txt` before distributing any output.

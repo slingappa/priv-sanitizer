@@ -254,19 +254,99 @@ def sample_frames(
     video: Path, output_dir: Path, every: float = 4.0, duration: float | None = None
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    pattern = output_dir / "frame-%06d.jpg"
+    # FFmpeg's fps filter can rebase the first selected PTS on recordings
+    # whose first decoded packet is not the presentation frame at t=0.  That
+    # is harmless for thumbnailing, but unsafe for privacy redaction: the
+    # first participant can be visible before the first periodic sample.  Keep
+    # an explicitly decoded source frame zero, then add the regular samples.
+    for stale in [*output_dir.glob("frame-*.jpg"), *output_dir.glob("periodic-*.jpg")]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    timestamp_path = output_dir / "frame-timestamps.json"
+    try:
+        timestamp_path.unlink()
+    except FileNotFoundError:
+        pass
+    first = output_dir / "frame-000000.jpg"
+    run([
+        _tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video), "-vf", r"select=eq(n\,0)", "-frames:v", "1",
+        "-q:v", "3", str(first),
+    ], progress_stage=None)
+    pattern = output_dir / "periodic-%06d.jpg"
     run([
         _tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(video), "-vf", f"fps=1/{max(every, 0.25):.3f}",
         "-q:v", "5", str(pattern),
     ], progress_stage="sampling frames", duration=duration)
-    return sorted(output_dir.glob("frame-*.jpg"))
+    periodic = sorted(output_dir.glob("periodic-*.jpg"))
+    frames = [first]
+    timestamps: dict[str, float] = {first.name: 0.0}
+    for index, path in enumerate(periodic, start=1):
+        target = output_dir / f"frame-{index:06d}.jpg"
+        path.replace(target)
+        # The periodic filter is intentionally treated as a nominal sampler.
+        # Layout/name regions are expanded to the surrounding sample segment,
+        # so a small PTS offset cannot leave an unredacted gap.
+        timestamps[target.name] = round(index * max(every, 0.25), 3)
+        frames.append(target)
+    timestamp_path.write_text(json.dumps(timestamps, indent=2) + "\n", encoding="utf-8")
+    return frames
+
+
+def _sample_entries(
+    frame_paths: Iterable[Path], duration: float, *, every: float = 4.0
+) -> list[tuple[Path, float, float, float]]:
+    """Return (path, timestamp, segment_start, segment_end) for sampled frames."""
+    paths = list(frame_paths)
+    if not paths:
+        return []
+    timestamps: dict[str, float] = {}
+    parents = {path.parent for path in paths}
+    if len(parents) == 1:
+        metadata = next(iter(parents)) / "frame-timestamps.json"
+        try:
+            raw = json.loads(metadata.read_text(encoding="utf-8"))
+            timestamps = {str(key): float(value) for key, value in raw.items()}
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            timestamps = {}
+    nominal_step = max(every, 0.25)
+    if not timestamps:
+        # Test callers and older jobs do not have the sidecar.  A uniform
+        # fallback still produces temporal regions instead of one global box.
+        step = duration / max(len(paths), 1)
+        timestamps = {
+            path.name: (index * step if len(paths) > 1 else 0.0)
+            for index, path in enumerate(paths)
+        }
+        nominal_step = step or nominal_step
+    ordered = sorted(
+        ((path, timestamps.get(path.name, index * nominal_step)) for index, path in enumerate(paths)),
+        key=lambda item: item[1],
+    )
+    entries: list[tuple[Path, float, float, float]] = []
+    for index, (path, timestamp) in enumerate(ordered):
+        timestamp = max(0.0, min(float(duration), float(timestamp)))
+        previous = ordered[index - 1][1] if index else timestamp - nominal_step
+        following = ordered[index + 1][1] if index + 1 < len(ordered) else timestamp + nominal_step
+        start = max(0.0, (float(previous) + timestamp) / 2.0)
+        end = min(float(duration), (timestamp + float(following)) / 2.0)
+        if index == 0:
+            start = 0.0
+        if index + 1 == len(ordered):
+            end = float(duration)
+        if end <= start:
+            end = min(float(duration), start + nominal_step)
+        entries.append((path, round(timestamp, 3), round(start, 3), round(end, 3)))
+    return entries
 
 
 def detector_capabilities() -> dict[str, Any]:
     """Report optional backend availability explicitly."""
     result: dict[str, Any] = {
-        "layout": {"available": True, "backend": "local-layout-v1"},
+        "layout": {"available": True, "backend": "local-layout-v2"},
         "ocr": {"available": False, "backend": "pytesseract", "reason": "not installed"},
         "face": {"available": False, "backend": "opencv-haar", "reason": "not installed"},
     }
@@ -307,14 +387,103 @@ def _mean_luma_right_strip(path: Path) -> tuple[float, float]:
         return ImageStat.Stat(left).mean[0], ImageStat.Stat(right).mean[0]
 
 
+def _mean_luma(path: Path) -> float:
+    try:
+        from PIL import Image, ImageStat
+    except ImportError as exc:
+        raise ToolError("Pillow is required for baseline frame analysis") from exc
+    with Image.open(path) as image:
+        gray = image.convert("L").resize((64, 36))
+        return float(ImageStat.Stat(gray).mean[0])
+
+
+def _frame_has_right_rail(path: Path) -> bool:
+    left, right = _mean_luma_right_strip(path)
+    # A per-frame signal only.  It must never become a whole-video layout
+    # assumption because Meet can switch to full-screen or grid layouts.
+    return right < 65 and left > 25 and right + 8 < left
+
+
+def _active_layout_boxes(
+    layout_regions: list[dict[str, Any]], timestamp: float
+) -> list[tuple[float, float, float, float]]:
+    return [
+        tuple(region["box"])
+        for region in layout_regions
+        if region.get("kind") == "participant_panel"
+        and float(region.get("start", 0.0)) <= timestamp < float(region.get("end", timestamp + 1e-6))
+    ]
+
+
+def _region_key(box: Iterable[float]) -> tuple[int, int, int, int]:
+    return tuple(round(float(value) * 10000) for value in box)  # type: ignore[return-value]
+
+
+def _merge_regions(regions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent observations while retaining their time boundaries."""
+    ordered = sorted(
+        (dict(region) for region in regions),
+        key=lambda region: (
+            _region_key(region.get("box", [0, 0, 0, 0])),
+            float(region.get("start", 0.0)),
+        ),
+    )
+    merged: list[dict[str, Any]] = []
+    for region in ordered:
+        if not merged:
+            merged.append(region)
+            continue
+        previous = merged[-1]
+        same_box = _region_key(previous.get("box", [])) == _region_key(region.get("box", []))
+        same_kind = previous.get("kind") == region.get("kind")
+        merge_gap = 4.25 if region.get("kind") == "participant_fullscreen" else 0.25
+        touches = float(region.get("start", 0.0)) <= float(previous.get("end", 0.0)) + merge_gap
+        if same_box and same_kind and touches:
+            previous["end"] = max(float(previous.get("end", 0.0)), float(region.get("end", 0.0)))
+            previous["confidence"] = max(
+                float(previous.get("confidence", 0.0)), float(region.get("confidence", 0.0))
+            )
+            previous["sources"] = list(dict.fromkeys([*previous.get("sources", []), *region.get("sources", [])]))
+        else:
+            merged.append(region)
+    return merged
+
+
+def _select_ocr_entries(
+    entries: list[tuple[Path, float, float, float]],
+    layout_regions: list[dict[str, Any]],
+    known_names: list[str],
+    limit: int = 180,
+) -> list[tuple[Path, float, float, float]]:
+    """Bound expensive OCR while retaining every non-rail layout transition."""
+    candidates = [
+        entry for entry in entries
+        if not _active_layout_boxes(layout_regions, entry[1])
+    ]
+    if not candidates and entries:
+        # Keep a small panel sample for detector evidence and compatibility
+        # with short/rail-only clips; the enclosing panel itself is already
+        # the rendered privacy region.
+        candidates = entries[: min(20, len(entries))]
+    if len(candidates) <= limit:
+        return candidates
+    # Uniform coverage plus explicit first/last frames protects short
+    # full-screen scenes without turning a long recording into thousands of
+    # serial Tesseract processes.
+    indexes = {0, len(candidates) - 1}
+    stride = (len(candidates) - 1) / max(limit - 2, 1)
+    indexes.update(round(index * stride) for index in range(limit - 2))
+    return [candidates[index] for index in sorted(indexes)]
+
+
 def detect_layout_regions(
     frame_paths: Iterable[Path], duration: float, width: int, height: int
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
-    """Classify common Meet layouts with a deterministic local layout model."""
+    """Classify participant panels per sample, never as one global rail."""
     samples = list(frame_paths)
     warnings: list[str] = []
     evidence: dict[str, Any] = {
-        "backend": "local-layout-v1",
+        "backend": "local-layout-v2",
         "sample_count": len(samples),
         "class": "unknown",
         "right_panel_ratio": 0.0,
@@ -324,30 +493,35 @@ def detect_layout_regions(
         return [], ["no frames were available for layout analysis"], evidence
     dark_hits = 0
     luma_samples: list[dict[str, float]] = []
-    for path in samples:
+    entries = _sample_entries(samples, duration)
+    rail_regions: list[dict[str, Any]] = []
+    for path, timestamp, start, end in entries:
         left, right = _mean_luma_right_strip(path)
         luma_samples.append({"left": round(left, 2), "right": round(right, 2)})
-        if right < 65 and left > 25 and right + 8 < left:
+        if _frame_has_right_rail(path):
             dark_hits += 1
+            rail_regions.append({
+                "id": f"layout-right-participant-panel-{len(rail_regions):04d}",
+                "start": start,
+                "end": end,
+                "kind": "participant_panel",
+                "mode": "blur",
+                "box": [0.75, 0.0, 0.25, 1.0],
+                "confidence": 0.80,
+                "sources": ["local-layout-v2", "right_panel_luma"],
+                "review_required": True,
+            })
     ratio = dark_hits / len(samples)
     evidence["right_panel_ratio"] = round(ratio, 3)
     evidence["luma_samples"] = luma_samples[:12]
-    if ratio < 0.35:
-        warnings.append("layout model found no stable participant rail; full-frame/grid layouts need review")
-        return [], warnings, evidence
-    evidence["class"] = "shared-content-plus-right-participant-rail"
-    evidence["protected_shared_content"] = [0.0, 0.0, 0.75, 1.0]
-    return [{
-        "id": "layout-right-participant-panel",
-        "start": 0.0,
-        "end": round(duration, 3),
-        "kind": "participant_panel",
-        "mode": "blur",
-        "box": [0.75, 0.0, 0.25, 1.0],
-        "confidence": round(min(0.95, 0.60 + ratio * 0.35), 3),
-        "sources": ["local-layout-v1", "right_panel_luma"],
-        "review_required": True,
-    }], warnings, evidence
+    if not rail_regions:
+        warnings.append("layout model found no right rail; full-frame/grid detectors were used")
+    else:
+        evidence["class"] = "temporal-participant-layouts"
+        evidence["protected_shared_content"] = [0.0, 0.0, 0.75, 1.0]
+    rail_regions = _merge_regions(rail_regions)
+    evidence["temporal_region_count"] = len(rail_regions)
+    return rail_regions, warnings, evidence
 
 
 def _panel_boxes(layout_regions: list[dict[str, Any]]) -> list[tuple[float, float, float, float]]:
@@ -358,8 +532,14 @@ def detect_ocr_regions(
     frame_paths: Iterable[Path],
     layout_regions: list[dict[str, Any]],
     known_names: Iterable[str] = (),
+    duration: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
-    """OCR likely participant panels with Tesseract when locally available."""
+    """OCR participant labels in the active layout, including full-screen views.
+
+    The detector intentionally samples the whole recording.  In a right-rail
+    frame it reads the rail crop; in any other layout it reads the full frame
+    and only accepts lower-third/edge text unless transcript names are known.
+    """
     capability = detector_capabilities()["ocr"]
     evidence: dict[str, Any] = {
         "backend": capability.get("backend"),
@@ -381,13 +561,28 @@ def detect_ocr_regions(
         return [], evidence, warnings
 
     names = [name.casefold() for name in known_names]
-    found: dict[tuple[int, int, int, int], dict[str, Any]] = {}
-    panels = _panel_boxes(layout_regions)
-    for frame in list(frame_paths)[:80]:
+    found: dict[tuple[int, ...], dict[str, Any]] = {}
+    fullscreen_frames: dict[tuple[int, int], tuple[float, float]] = {}
+    frames = list(frame_paths)
+    effective_duration = duration or max((float(item.get("end", 0.0)) for item in layout_regions), default=0.0)
+    effective_duration = effective_duration or float(len(frames) * 4.0)
+    entries = _sample_entries(frames, effective_duration)
+    # Older jobs do not carry a duration in layout regions.  Their fallback
+    # entries are still useful; each frame is treated as one temporal segment.
+    if not entries:
+        entries = _sample_entries(frames, float(len(frames) * 4.0))
+    for frame, timestamp, segment_start, segment_end in _select_ocr_entries(entries, layout_regions, names):
         with Image.open(frame) as image:
             image = image.convert("RGB")
             iw, ih = image.size
-            for px, py, pw, ph in panels:
+            panels = _active_layout_boxes(layout_regions, timestamp)
+            crops = [(box, image.crop((
+                int(box[0] * iw), int(box[1] * ih),
+                int((box[0] + box[2]) * iw), int((box[1] + box[3]) * ih),
+            ))) for box in panels]
+            if not crops:
+                crops = [((0.0, 0.0, 1.0, 1.0), image)]
+            for (px, py, pw, ph), crop in crops:
                 crop = image.crop((int(px * iw), int(py * ih), int((px + pw) * iw), int((py + ph) * ih)))
                 data = pytesseract.image_to_data(crop, output_type=Output.DICT, config="--psm 11")
                 for i, raw in enumerate(data.get("text", [])):
@@ -395,31 +590,54 @@ def detect_ocr_regions(
                     if not text or not re.search(r"[A-Za-z]", text):
                         continue
                     confidence = float(data.get("conf", ["-1"])[i] or -1)
-                    if confidence < 35 and not any(text.casefold() in name for name in names):
-                        continue
                     x, y, w, h = [int(data[key][i]) for key in ("left", "top", "width", "height")]
+                    known_name = any(name in text.casefold() or text.casefold() in name for name in names)
+                    # Full-frame OCR can see slide text.  Without transcript
+                    # names, restrict automatic name candidates to the lower
+                    # third/edge where Meet labels and nameplates appear.
+                    relative_y = y / max(crop.height, 1)
+                    participant_position = relative_y >= 0.62 or (px < 0.20 and relative_y >= 0.45)
+                    if confidence < 35 and not known_name:
+                        continue
+                    if not panels and not known_name and not participant_position:
+                        continue
                     box = (
                         round(px + (x / max(crop.width, 1)) * pw, 6),
                         round(py + (y / max(crop.height, 1)) * ph, 6),
                         round((w / max(crop.width, 1)) * pw, 6),
                         round((h / max(crop.height, 1)) * ph, 6),
                     )
-                    key = tuple(round(value * 10000) for value in box)
+                    key = tuple(round(value * 10000) for value in box) + (round(segment_start * 100),)
                     found[key] = {
                         "id": f"ocr-name-{len(found):04d}",
-                        "start": 0.0,
-                        "end": None,
+                        "start": segment_start,
+                        "end": segment_end,
                         "kind": "participant_name",
                         "mode": "blur",
                         "box": list(box),
                         "text": text,
                         "confidence": round(max(0.0, min(1.0, confidence / 100.0)), 3),
-                        "sources": ["tesseract-ocr", "participant-panel-layout"],
+                        "sources": ["tesseract-ocr", "participant-panel-layout" if panels else "full-frame-layout"],
                         "review_required": True,
                     }
-    results = list(found.values())
-    for item in results:
-        item["end"] = max((region["end"] for region in layout_regions), default=0.0)
+                    if not panels and (known_name or _mean_luma(frame) < 80):
+                        fullscreen_frames[(round(segment_start * 100), round(segment_end * 100))] = (
+                            segment_start, segment_end
+                        )
+    for segment_start, segment_end in fullscreen_frames.values():
+        key = (0, 0, 10000, 10000, round(segment_start * 100))
+        found[key] = {
+            "id": f"participant-fullscreen-{len(found):04d}",
+            "start": segment_start,
+            "end": segment_end,
+            "kind": "participant_fullscreen",
+            "mode": "blur",
+            "box": [0.0, 0.0, 1.0, 1.0],
+            "confidence": 0.68,
+            "sources": ["tesseract-ocr", "full-frame-layout"],
+            "review_required": True,
+        }
+    results = _merge_regions(found.values())
     evidence["detections"] = len(results)
     if not results:
         warnings.append("OCR backend ran but found no confident participant-panel text")
@@ -429,7 +647,7 @@ def detect_ocr_regions(
 def detect_face_regions(
     frame_paths: Iterable[Path], layout_regions: list[dict[str, Any]], duration: float
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
-    """Detect faces in participant panels with OpenCV's local Haar detector."""
+    """Detect faces in active panels or anywhere in non-rail layouts."""
     capability = detector_capabilities()["face"]
     evidence: dict[str, Any] = {
         "backend": capability.get("backend"),
@@ -459,15 +677,20 @@ def detect_face_regions(
         warnings.append("OpenCV Haar face cascade could not be loaded")
         evidence["available"] = False
         return [], evidence, warnings
-    found: dict[tuple[int, int, int, int], dict[str, Any]] = {}
-    panels = _panel_boxes(layout_regions)
-    for frame in list(frame_paths)[:80]:
+    found: dict[tuple[int, ...], dict[str, Any]] = {}
+    for frame, timestamp, segment_start, segment_end in _sample_entries(frame_paths, duration):
         image = cv2.imread(str(frame))
         if image is None:
             continue
         ih, iw = image.shape[:2]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        for px, py, pw, ph in panels:
+        panels = _active_layout_boxes(layout_regions, timestamp)
+        # When no panel is active, inspect the full frame.  This is what
+        # catches a speaker view or centered avatar after a shared-screen
+        # segment.  In a known rail layout, restrict face search to the rail
+        # so faces on shared slides remain untouched.
+        scan_boxes = panels or [(0.0, 0.0, 1.0, 1.0)]
+        for px, py, pw, ph in scan_boxes:
             x0, y0, x1, y1 = int(px * iw), int(py * ih), int((px + pw) * iw), int((py + ph) * ih)
             roi = gray[y0:y1, x0:x1]
             faces = cascade.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
@@ -476,19 +699,44 @@ def detect_face_regions(
                 bx, by = max(0, x0 + x - pad_x), max(0, y0 + y - pad_y)
                 bw, bh = min(iw - bx, w + 2 * pad_x), min(ih - by, h + 2 * pad_y)
                 box = (round(bx / iw, 6), round(by / ih, 6), round(bw / iw, 6), round(bh / ih, 6))
-                key = tuple(round(value * 10000) for value in box)
+                # A large centered face is a speaker/full-screen view.  Blur
+                # the complete participant view so the nameplate/avatar and
+                # surrounding identifying UI are covered as well.
+                fullscreen = (
+                    not panels and (box[2] >= 0.16 or box[3] >= 0.24 or box[2] * box[3] >= 0.045)
+                )
+                if fullscreen:
+                    render_box = (0.0, 0.0, 1.0, 1.0)
+                    kind = "participant_fullscreen"
+                elif not panels:
+                    # Grid/tile layouts can place a participant anywhere and
+                    # usually draw the name directly below the face.  Expand
+                    # the face crop to cover that local tile without masking
+                    # the entire shared canvas.
+                    pad_x = max(box[2] * 1.25, 0.045)
+                    pad_y = max(box[3] * 1.50, 0.075)
+                    bx2 = max(0.0, box[0] - pad_x)
+                    by2 = max(0.0, box[1] - pad_y)
+                    ex = min(1.0, box[0] + box[2] + pad_x)
+                    ey = min(1.0, box[1] + box[3] + pad_y)
+                    render_box = (round(bx2, 6), round(by2, 6), round(ex - bx2, 6), round(ey - by2, 6))
+                    kind = "participant_tile"
+                else:
+                    render_box = box
+                    kind = "participant_face"
+                key = tuple(round(value * 10000) for value in render_box) + (round(segment_start * 100),)
                 found[key] = {
                     "id": f"face-{len(found):04d}",
-                    "start": 0.0,
-                    "end": round(duration, 3),
-                    "kind": "participant_face",
+                    "start": segment_start,
+                    "end": segment_end,
+                    "kind": kind,
                     "mode": "blur",
-                    "box": list(box),
+                    "box": list(render_box),
                     "confidence": 0.70,
-                    "sources": ["opencv-haar", "participant-panel-layout"],
+                    "sources": ["opencv-haar", "participant-panel-layout" if panels else "full-frame-layout"],
                     "review_required": True,
                 }
-    results = list(found.values())
+    results = _merge_regions(found.values())
     evidence["detections"] = len(results)
     if not results:
         warnings.append("face detector ran but found no stable participant faces; avatars still rely on panel fallback")
@@ -502,11 +750,25 @@ def detect_visual_regions(
     """Run layout, OCR, and face detectors and return auditable evidence."""
     frames = list(frame_paths)
     layout, warnings, layout_evidence = detect_layout_regions(frames, duration, width, height)
+    dark_fullscreen: list[dict[str, Any]] = []
+    for frame, timestamp, segment_start, segment_end in _sample_entries(frames, duration):
+        if not _active_layout_boxes(layout, timestamp) and _mean_luma(frame) < 80:
+            dark_fullscreen.append({
+                "id": f"layout-dark-fullscreen-{len(dark_fullscreen):04d}",
+                "start": segment_start,
+                "end": segment_end,
+                "kind": "participant_fullscreen",
+                "mode": "blur",
+                "box": [0.0, 0.0, 1.0, 1.0],
+                "confidence": 0.62,
+                "sources": ["local-layout-v2", "dark-full-frame"],
+                "review_required": True,
+            })
     # OCR and face detection are independent and can run concurrently.  The
     # detector libraries may create their own native threads, so keep this
     # fan-out bounded rather than creating one thread per frame.
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="priv-vision") as pool:
-        ocr_future = pool.submit(detect_ocr_regions, frames, layout, known_names)
+        ocr_future = pool.submit(detect_ocr_regions, frames, layout, known_names, duration)
         face_future = pool.submit(detect_face_regions, frames, layout, duration)
         try:
             ocr, ocr_evidence, ocr_warnings = ocr_future.result()
@@ -522,15 +784,16 @@ def detect_visual_regions(
                 "backend": "opencv-haar", "available": False, "detections": 0,
                 "reason": f"backend error: {exc}",
             }, [f"face backend error: {exc}; participant panel fallback remains active"]
-    candidates = [*layout, *ocr, *faces]
-    # A stable participant rail already encloses the OCR and face candidates.
-    # Rendering all nested boxes creates a long serial FFmpeg graph and gives
-    # no additional privacy benefit. Keep the detailed candidates in the
-    # analysis evidence, but render the enclosing rail only. If no enclosing
-    # layout is known, fall back to the precise OCR/face boxes.
-    regions = layout if layout else [*ocr, *faces]
+    candidates = [*layout, *dark_fullscreen, *ocr, *faces]
+    # Layout regions are now temporal.  Keep precise OCR/face/full-screen
+    # regions as well, but suppress nested face/name boxes while an enclosing
+    # participant rail/full-screen region covers the same interval.  This
+    # avoids a giant filter graph without discarding detections from other
+    # layouts later in the recording.
+    regions = _coalesce_render_regions(candidates)
     detectors = {
         "layout": layout_evidence,
+        "dark_fullscreen_regions": len(dark_fullscreen),
         "ocr": ocr_evidence,
         "face": face_evidence,
         "candidate_region_count": len(candidates),
@@ -539,6 +802,37 @@ def detect_visual_regions(
         "face_regions": faces,
     }
     return regions, [*warnings, *ocr_warnings, *face_warnings], detectors
+
+
+def _coalesce_render_regions(regions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate adjacent detections and drop boxes enclosed by a panel."""
+    merged = _merge_regions(regions)
+    result: list[dict[str, Any]] = []
+    for region in merged:
+        box = [float(value) for value in region.get("box", [0, 0, 0, 0])]
+        contained = False
+        for outer in merged:
+            if outer is region:
+                continue
+            outer_box = [float(value) for value in outer.get("box", [0, 0, 0, 0])]
+            same_window = (
+                float(outer.get("start", 0.0)) <= float(region.get("start", 0.0)) + 0.25
+                and float(outer.get("end", 0.0)) >= float(region.get("end", 0.0)) - 0.25
+            )
+            encloses = (
+                outer_box[0] <= box[0] and outer_box[1] <= box[1]
+                and outer_box[0] + outer_box[2] >= box[0] + box[2]
+                and outer_box[1] + outer_box[3] >= box[1] + box[3]
+                and (outer_box[2] * outer_box[3]) > (box[2] * box[3]) * 1.15
+            )
+            if same_window and encloses and outer.get("kind") in {
+                "participant_panel", "participant_fullscreen", "participant_tile"
+            }:
+                contained = True
+                break
+        if not contained:
+            result.append(region)
+    return sorted(result, key=lambda item: (float(item.get("start", 0.0)), item.get("kind", "")))
 
 
 def detect_speech_intervals(video: Path, duration: float) -> tuple[list[dict[str, Any]], list[str]]:
@@ -621,7 +915,7 @@ def _blur_filter_graph(visual: list[dict[str, Any]]) -> tuple[str, str]:
             # Small face crops can reject the default chroma radius. Luma
             # blur is sufficient to destroy facial detail and works for both
             # the full participant rail and small detected face boxes.
-            f"boxblur=luma_radius=18:luma_power=2:chroma_radius=0:chroma_power=0[{blurred}]"
+            f"boxblur=luma_radius=18:luma_power=2:chroma_radius=0:chroma_power=0:enable='{enable}'[{blurred}]"
         )
         filters.append(
             f"[{base}][{blurred}]overlay=x=main_w*{x}:y=main_h*{y}:enable='{enable}'[{next_label}]"

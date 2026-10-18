@@ -50,7 +50,7 @@ def test_batch_runs_both_passes_and_writes_report(tmp_path):
             raise RuntimeError("synthetic baseline failure")
         job.mkdir(parents=True, exist_ok=True)
 
-    def fake_render(job: Path, output_dir: Path):
+    def fake_render(job: Path, output_dir: Path, **kwargs):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "sanitized.mp4").write_bytes(b"fake video")
         return {"verify": {"passed": True}}

@@ -52,8 +52,10 @@ The workflow has two passes:
 1. Baseline: video-only input. Preserve audio by default, blur participant visuals, skip the expensive audio scan unless explicitly enabled, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
 2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it as secondary evidence for names, speaker labels, and timing. Audio remains unchanged by default; `--experimental-audio` explicitly opts in to short matched-name mute windows. Do not rewrite or emit a sanitized transcript.
 
-The detector stack records local layout-model evidence, OCR evidence (Tesseract
-when installed), and face-detection evidence (OpenCV Haar when installed).
+The detector stack records per-segment layout-model evidence, OCR evidence
+(Tesseract when installed), and face-detection evidence (OpenCV Haar when
+installed). It does not assume participants stay in a right-side rail: it
+also scans full-screen speaker/avatar views and arbitrary grid/tile positions.
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
 
