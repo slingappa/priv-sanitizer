@@ -13,6 +13,7 @@ from priv_sanitizer.media import (
     detect_layout_regions,
     detect_ocr_regions,
     sample_frames,
+    _scene_change_frames,
     _verbose,
 )
 
@@ -160,12 +161,35 @@ def test_sample_frames_drops_duplicate_periodic_source_zero(tmp_path):
             for index in (1, 2):
                 output.parent.joinpath(f"periodic-{index:06d}.jpg").write_bytes(b"periodic")
 
-    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+    with patch.dict(os.environ, {"PRIV_SANITIZER_SCENE_DETECTION": "0"}), patch(
+        "priv_sanitizer.media.run", side_effect=fake_run
+    ):
         frames = sample_frames(Path("input.mp4"), tmp_path, every=4.0, duration=8.0)
 
     assert [path.name for path in frames] == ["frame-000000.jpg", "frame-000001.jpg"]
     timestamps = __import__("json").loads((tmp_path / "frame-timestamps.json").read_text())
     assert timestamps == {"frame-000000.jpg": 0.0, "frame-000001.jpg": 4.0}
+
+
+def test_scene_change_candidates_keep_transition_edges(tmp_path):
+    def fake_run(args, **kwargs):
+        for index in range(1, 4):
+            tmp_path.joinpath(f"change-{index:06d}.jpg").write_bytes(b"change")
+        return __import__("subprocess").CompletedProcess(
+            args,
+            0,
+            stderr="\n".join([
+                "[showinfo] pts_time:1.000",
+                "[showinfo] pts_time:1.200",
+                "[showinfo] pts_time:3.000",
+            ]),
+        )
+
+    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+        selected = _scene_change_frames(Path("input.mp4"), tmp_path, 8.0)
+
+    assert [round(timestamp, 3) for _, timestamp in selected] == [1.0, 1.2, 3.0]
+    assert len(list(tmp_path.glob("change-*.jpg"))) == 3
 
 
 def test_verbose_details_are_log_only(tmp_path):

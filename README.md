@@ -200,6 +200,14 @@ Sampling always includes an explicit decode of the source's first frame before
 periodic samples, so a participant visible at `t=0` is covered by the first
 temporal redaction interval.
 
+In addition to the coarse cadence, the baseline performs a lightweight
+FFmpeg scene-change pass and adds the first/last frame around each clustered
+transition to OCR, face, and layout analysis. This catches brief Meet layout
+changes without decoding every frame at high resolution. Override the defaults
+with `PRIV_SANITIZER_SCENE_THRESHOLD` and
+`PRIV_SANITIZER_SCENE_MERGE_SECONDS`, or disable the trigger layer for a
+diagnostic comparison with `PRIV_SANITIZER_SCENE_DETECTION=0`.
+
 ## Optional hardening
 
 ```bash

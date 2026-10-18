@@ -303,8 +303,110 @@ def sample_frames(
         # timestamp quantization.
         timestamps[target.name] = round(index * max(every, 0.25), 3)
         frames.append(target)
+    scene_frames = _scene_change_frames(video, output_dir, duration)
+    existing_times = list(timestamps.values())
+    for path, timestamp in scene_frames:
+        if any(abs(timestamp - existing) < 0.25 for existing in existing_times):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        timestamp = round(max(0.0, min(float(duration or timestamp), timestamp)), 3)
+        timestamps[path.name] = timestamp
+        existing_times.append(timestamp)
+        frames.append(path)
     timestamp_path.write_text(json.dumps(timestamps, indent=2) + "\n", encoding="utf-8")
     return frames
+
+
+def _scene_change_threshold() -> float:
+    try:
+        return max(0.001, min(1.0, float(os.environ.get("PRIV_SANITIZER_SCENE_THRESHOLD", "0.02"))))
+    except ValueError:
+        return 0.02
+
+
+def _scene_change_merge_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("PRIV_SANITIZER_SCENE_MERGE_SECONDS", "0.75")))
+    except ValueError:
+        return 0.75
+
+
+def _scene_change_frames(
+    video: Path, output_dir: Path, duration: float | None,
+) -> list[tuple[Path, float]]:
+    """Extract high-resolution frames at FFmpeg scene-change candidates.
+
+    This is a trigger layer, not a privacy decision: the candidates are fed
+    through the normal layout/OCR/face detectors.  Keeping the first and last
+    frame of each nearby candidate cluster captures both sides of a brief
+    participant-layout transition without OCR-running every decoded frame.
+    """
+    if os.environ.get("PRIV_SANITIZER_SCENE_DETECTION", "1").lower() in {
+        "0", "false", "no", "off"
+    }:
+        return []
+    for stale in output_dir.glob("change-*.jpg"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    threshold = _scene_change_threshold()
+    pattern = output_dir / "change-%06d.jpg"
+    result = run([
+        _tool("ffmpeg"), "-hide_banner", "-loglevel", "info", "-y",
+        "-i", str(video),
+        "-vf", f"select='gt(scene,{threshold:.4f})',showinfo",
+        "-fps_mode", "vfr", "-q:v", "5", str(pattern),
+    ], progress_stage="detecting scene changes", duration=duration)
+    timestamps = [
+        float(match.group(1))
+        for line in (result.stderr or "").splitlines()
+        if (match := re.search(r"pts_time:([0-9.]+)", line))
+    ]
+    paths = sorted(output_dir.glob("change-*.jpg"))
+    if len(paths) != len(timestamps):
+        _verbose(
+            f"scene-change timestamp/frame mismatch: {len(timestamps)} timestamps, "
+            f"{len(paths)} images; using the common prefix"
+        )
+    candidates = [
+        (path, timestamp)
+        for path, timestamp in zip(paths, timestamps)
+        if timestamp >= 0.0 and (duration is None or timestamp <= float(duration) + 0.25)
+    ]
+    if not candidates:
+        for path in paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return []
+    merge_seconds = _scene_change_merge_seconds()
+    clusters: list[list[tuple[Path, float]]] = []
+    for candidate in candidates:
+        if not clusters or candidate[1] - clusters[-1][-1][1] > merge_seconds:
+            clusters.append([candidate])
+        else:
+            clusters[-1].append(candidate)
+    selected: list[tuple[Path, float]] = []
+    keep_paths: set[Path] = set()
+    for cluster in clusters:
+        selected.extend([cluster[0]] if len(cluster) == 1 else [cluster[0], cluster[-1]])
+    keep_paths.update(path for path, _ in selected)
+    for path, _ in candidates:
+        if path not in keep_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    _verbose(
+        f"scene-change candidates: {len(candidates)} frames, "
+        f"{len(selected)} retained across {len(clusters)} clusters"
+    )
+    return selected
 
 
 def _sample_entries(
