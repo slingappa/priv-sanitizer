@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import time
 from datetime import datetime, timezone
@@ -97,7 +98,14 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def baseline(video: Path, job: Path, *, audio_mode: str = "preserve", every: float = 4.0) -> dict[str, Any]:
+def baseline(
+    video: Path,
+    job: Path,
+    *,
+    audio_mode: str = "preserve",
+    every: float = 4.0,
+    analyze_audio: bool | None = None,
+) -> dict[str, Any]:
     video = video.resolve()
     job.mkdir(parents=True, exist_ok=True)
     _status("probing input")
@@ -112,9 +120,21 @@ def baseline(video: Path, job: Path, *, audio_mode: str = "preserve", every: flo
         frames, info["duration"], info["width"], info["height"]
     )
     _status(f"visual analysis complete: {len(visual)} regions in {time.perf_counter() - stage_started:.1f}s")
-    stage_started = time.perf_counter()
-    speech_activity, audio_warnings = detect_speech_intervals(video, info["duration"])
-    _status(f"audio analysis complete in {time.perf_counter() - stage_started:.1f}s")
+    if analyze_audio is None:
+        analyze_audio = (
+            audio_mode != "preserve"
+            or os.environ.get("PRIV_SANITIZER_AUDIO_ANALYSIS", "").lower() in {"1", "true", "yes", "on"}
+        )
+    speech_activity: list[dict[str, Any]] = []
+    audio_warnings: list[str] = []
+    if analyze_audio:
+        stage_started = time.perf_counter()
+        _status("analysing audio")
+        speech_activity, audio_warnings = detect_speech_intervals(video, info["duration"])
+        _status(f"audio analysis complete in {time.perf_counter() - stage_started:.1f}s")
+    else:
+        _status("audio analysis skipped (audio preserved; enable --experimental-audio or PRIV_SANITIZER_AUDIO_ANALYSIS=1 to enable)")
+        audio_warnings.append("speech activity analysis skipped because audio processing is disabled")
     audio = []
     if audio_mode != "preserve":
         audio_warnings.append(
@@ -128,7 +148,7 @@ def baseline(video: Path, job: Path, *, audio_mode: str = "preserve", every: flo
         "source": {"video": str(video), "video_name": video.name},
         "policy": "conservative",
         "pass": "baseline",
-        "analysis_sources": ["video", "layout", "ocr", "face", "vad-evidence"],
+        "analysis_sources": ["video", "layout", "ocr", "face"] + (["vad-evidence"] if analyze_audio else []),
         "audio_mode": audio_mode,
         "video": {k: info[k] for k in ("width", "height", "duration", "fps")},
         "protected_regions": [],
@@ -261,13 +281,23 @@ def write_report(job: Path, analysis: dict[str, Any], manifest: dict[str, Any]) 
     (job / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def render_job(job: Path, output_dir: Path) -> dict[str, Any]:
+def render_job(
+    job: Path,
+    output_dir: Path,
+    *,
+    verify_audio: bool | None = None,
+) -> dict[str, Any]:
     _status("preparing render")
     manifest = read_json(job / "redaction-manifest.json")
     source = Path(manifest["source"]["video"])
     output_dir.mkdir(parents=True, exist_ok=True)
     result = render(source, manifest, output_dir / "sanitized.mp4")
-    verify = verify_output(source, output_dir / "sanitized.mp4")
+    if verify_audio is None:
+        verify_audio = (
+            manifest.get("audio_mode") != "preserve"
+            or os.environ.get("PRIV_SANITIZER_AUDIO_ANALYSIS", "").lower() in {"1", "true", "yes", "on"}
+        )
+    verify = verify_output(source, output_dir / "sanitized.mp4", audio_metrics=verify_audio)
     write_json(output_dir / "render.json", {**result, "verify": verify})
     return {**result, "verify": verify}
 
@@ -317,8 +347,14 @@ def batch(
         final_source: Path | None = None
         try:
             _status(f"batch {index}/{len(videos)}: baseline {video.name}")
-            baseline(video, baseline_job, audio_mode="preserve", every=every)
-            baseline_render = render_job(baseline_job, baseline_dir)
+            baseline(
+                video,
+                baseline_job,
+                audio_mode="preserve",
+                every=every,
+                analyze_audio=experimental_audio,
+            )
+            baseline_render = render_job(baseline_job, baseline_dir, verify_audio=experimental_audio)
             entry["baseline"] = {
                 "status": "completed" if baseline_render["verify"]["passed"] else "failed",
                 "output": str((baseline_dir / "sanitized.mp4").resolve()),
@@ -338,7 +374,7 @@ def batch(
                         narrow_audio=experimental_audio,
                         transcript_offset=0.0,
                     )
-                    hardened_render = render_job(hardened_job, hardened_dir)
+                    hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
                     entry["hardened"] = {
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
                         "output": str((hardened_dir / "sanitized.mp4").resolve()),
@@ -384,12 +420,24 @@ def batch(
     return report
 
 
-def verify_output(source: Path, output: Path) -> dict[str, Any]:
+def verify_output(
+    source: Path,
+    output: Path,
+    *,
+    audio_metrics: bool | None = None,
+) -> dict[str, Any]:
     src = probe(source)
     dst = probe(output)
     duration_delta = abs(src["duration"] - dst["duration"])
-    source_audio = audio_levels(source) if src["has_audio"] else {"mean_db": None, "max_db": None}
-    output_audio = audio_levels(output) if dst["has_audio"] else {"mean_db": None, "max_db": None}
+    if audio_metrics is None:
+        audio_metrics = os.environ.get("PRIV_SANITIZER_AUDIO_ANALYSIS", "").lower() in {"1", "true", "yes", "on"}
+    if audio_metrics:
+        source_audio = audio_levels(source) if src["has_audio"] else {"mean_db": None, "max_db": None}
+        output_audio = audio_levels(output) if dst["has_audio"] else {"mean_db": None, "max_db": None}
+    else:
+        _status("audio level verification skipped (audio presence and duration are still checked)")
+        source_audio = {"mean_db": None, "max_db": None}
+        output_audio = {"mean_db": None, "max_db": None}
     audio_presence_ok = not src["has_audio"] or dst["has_audio"]
     result = {
         "source_duration": src["duration"],
@@ -399,6 +447,7 @@ def verify_output(source: Path, output: Path) -> dict[str, Any]:
         "output_has_video": dst["width"] > 0 and dst["height"] > 0,
         "output_has_audio": dst["has_audio"],
         "audio_presence_ok": audio_presence_ok,
+        "audio_levels_checked": audio_metrics,
         "source_audio_levels": source_audio,
         "output_audio_levels": output_audio,
         "passed": duration_delta <= 1.0 and dst["width"] > 0 and dst["height"] > 0 and audio_presence_ok,

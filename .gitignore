@@ -2,6 +2,7 @@
 .venv/
 .tools/
 .docker-runtime
+verbose.log
 
 # Python build/cache files
 __pycache__/

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
+import shlex
 import shutil
 import subprocess
 import time
@@ -15,6 +17,10 @@ from typing import Any, Iterable
 
 class ToolError(RuntimeError):
     pass
+
+
+_VERBOSE_LOG_INITIALIZED = False
+_VERBOSE_LOG_FAILURE_REPORTED = False
 
 
 def _tool(name: str) -> str:
@@ -47,12 +53,55 @@ def _tool(name: str) -> str:
 def _status(message: str) -> None:
     if os.environ.get("PRIV_SANITIZER_QUIET") != "1":
         print(f"[priv-sanitizer] {message}", file=os.sys.stderr, flush=True)
+    _verbose_log(f"status: {message}")
+
+
+def _verbose_enabled() -> bool:
+    return (
+        os.environ.get("PRIV_SANITIZER_QUIET") != "1"
+        and os.environ.get("PRIV_SANITIZER_VERBOSE", "").lower() in {"1", "true", "yes", "on"}
+    )
+
+
+def _verbose_log(message: str) -> None:
+    """Append diagnostics to the caller's working-directory log when enabled."""
+    global _VERBOSE_LOG_INITIALIZED, _VERBOSE_LOG_FAILURE_REPORTED
+    if not _verbose_enabled():
+        return
+    path = Path(os.environ.get("PRIV_SANITIZER_VERBOSE_LOG", "verbose.log"))
+    try:
+        with path.open("a", encoding="utf-8") as stream:
+            if not _VERBOSE_LOG_INITIALIZED:
+                stream.write(
+                    f"=== priv-sanitizer verbose session {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
+                )
+                _VERBOSE_LOG_INITIALIZED = True
+            stream.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n")
+    except OSError as exc:
+        if not _VERBOSE_LOG_FAILURE_REPORTED:
+            print(f"[priv-sanitizer] WARNING: could not write verbose log {path}: {exc}", file=os.sys.stderr, flush=True)
+            _VERBOSE_LOG_FAILURE_REPORTED = True
+
+
+def _verbose(message: str) -> None:
+    if _verbose_enabled():
+        rendered = f"verbose: {message}"
+        print(f"[priv-sanitizer] {rendered}", file=os.sys.stderr, flush=True)
+        _verbose_log(rendered)
+
+
+def _heartbeat_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("PRIV_SANITIZER_HEARTBEAT_SECONDS", "15")))
+    except ValueError:
+        return 15.0
 
 
 def _progress_status(stage: str, percent: int, *, final: bool = False) -> None:
     if os.environ.get("PRIV_SANITIZER_QUIET") == "1":
         return
     message = f"[priv-sanitizer] {stage}: {percent:3d}%"
+    _verbose_log(f"progress: {stage}: {percent:3d}%")
     stream = os.sys.stderr
     if stream.isatty():
         suffix = "\033[K\n" if final else "\033[K"
@@ -65,6 +114,9 @@ def run(
     args: list[str], *, capture: bool = True, progress_stage: str | None = None,
     duration: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    started = time.perf_counter()
+    if _verbose_enabled():
+        _verbose(f"starting ({progress_stage or 'command'}): {shlex.join(args)}")
     if progress_stage:
         progress_args = [args[0], "-progress", "pipe:1", *args[1:]]
         try:
@@ -78,26 +130,84 @@ def run(
             raise ToolError(str(exc)) from exc
         last_percent = -1
         stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
         assert process.stdout is not None
-        for line in process.stdout:
-            line = line.strip()
-            if not line:
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, data="stdout")
+        if process.stderr is not None:
+            # Drain FFmpeg diagnostics concurrently. Filters such as
+            # silencedetect can emit enough stderr on long recordings to fill
+            # the pipe; waiting until stdout closes would deadlock FFmpeg.
+            selector.register(process.stderr, selectors.EVENT_READ, data="stderr")
+        last_progress_at = started
+        heartbeat = _heartbeat_seconds()
+        while selector.get_map():
+            events = selector.select(timeout=heartbeat)
+            if not events:
+                if process.poll() is None:
+                    elapsed = time.perf_counter() - started
+                    quiet_for = time.perf_counter() - last_progress_at
+                    _verbose(
+                        f"{progress_stage} still running after {elapsed:.0f}s "
+                        f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
+                    )
                 continue
-            stdout_lines.append(line)
-            match = re.match(r"out_time_ms=(\d+)", line)
-            if match and duration and duration > 0:
-                percent = min(99, int((int(match.group(1)) / 1_000_000) / duration * 100))
-                if percent != last_percent:
-                    _progress_status(progress_stage, percent)
-                    last_percent = percent
-        stderr = process.stderr.read() if process.stderr is not None else ""
+            for key, _ in events:
+                line = key.fileobj.readline()
+                if not line:
+                    selector.unregister(key.fileobj)
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                if key.data == "stderr":
+                    stderr_lines.append(line)
+                    continue
+                stdout_lines.append(line)
+                match = re.match(r"out_time_ms=(\d+)", line)
+                if match and duration and duration > 0:
+                    last_progress_at = time.perf_counter()
+                    percent = min(99, int((int(match.group(1)) / 1_000_000) / duration * 100))
+                    if percent != last_percent:
+                        _progress_status(progress_stage, percent)
+                        last_percent = percent
+        selector.close()
+        stderr = "\n".join(stderr_lines)
         returncode = process.wait()
         if returncode != 0:
             detail = (stderr or "\n".join(stdout_lines)).strip()
             raise ToolError(f"command failed ({returncode}): {' '.join(args)}\n{detail[-4000:]}")
         if last_percent >= 0:
             _progress_status(progress_stage, 100, final=True)
+        _verbose(f"finished ({progress_stage}) in {time.perf_counter() - started:.1f}s")
         return subprocess.CompletedProcess(progress_args, returncode, "\n".join(stdout_lines), stderr)
+    if _verbose_enabled():
+        try:
+            process = subprocess.Popen(
+                args,
+                text=True,
+                stdout=subprocess.PIPE if capture else None,
+                stderr=subprocess.PIPE if capture else None,
+            )
+        except OSError as exc:
+            raise ToolError(str(exc)) from exc
+        try:
+            stdout, stderr = process.communicate(timeout=_heartbeat_seconds())
+        except subprocess.TimeoutExpired:
+            while True:
+                elapsed = time.perf_counter() - started
+                _verbose(f"command still running after {elapsed:.0f}s: {shlex.join(args)}")
+                try:
+                    stdout, stderr = process.communicate(timeout=_heartbeat_seconds())
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise ToolError(f"command failed ({result.returncode}): {' '.join(args)}\n{detail[-4000:]}")
+        _verbose(f"finished (command) in {time.perf_counter() - started:.1f}s")
+        return result
     try:
         result = subprocess.run(args, text=True, capture_output=capture, check=False)
     except OSError as exc:

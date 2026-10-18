@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .media import ToolError, probe
@@ -22,6 +23,13 @@ def _directory(value: str) -> Path:
     if not path.exists() or not path.is_dir():
         raise argparse.ArgumentTypeError(f"directory does not exist: {path}")
     return path
+
+
+def _add_verbose_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
+        help="emit FFmpeg commands and periodic heartbeats for long-running stages",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=examples,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="emit FFmpeg commands and periodic heartbeats for long-running stages",
+    )
     sub = parser.add_subparsers(dest="command", required=False)
     parser.set_defaults(
         command="batch",
@@ -69,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Example:\n  priv-sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_verbose_option(batch_cmd)
     batch_cmd.add_argument("--input", type=_directory, default=Path.cwd())
     batch_cmd.add_argument("--output", type=Path, default=Path.cwd() / "outputs_sanitized")
     batch_cmd.add_argument(
@@ -83,22 +96,26 @@ def build_parser() -> argparse.ArgumentParser:
     batch_cmd.add_argument("--every", type=float, default=4.0)
 
     inspect = sub.add_parser("inspect", help="probe a video and initialize a job")
+    _add_verbose_option(inspect)
     inspect.add_argument("video", type=_path)
     inspect.add_argument("--job", type=Path, required=True)
 
     analyze = sub.add_parser("analyze", help="run baseline video-only analysis")
+    _add_verbose_option(analyze)
     analyze.add_argument("job", type=Path)
     analyze.add_argument("--pass", dest="analysis_pass", choices=["baseline"], default="baseline")
     analyze.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
     analyze.add_argument("--every", type=float, default=4.0)
 
     sanitize = sub.add_parser("sanitize", help="run baseline analysis and render")
+    _add_verbose_option(sanitize)
     sanitize.add_argument("--video", type=_path, required=True)
     sanitize.add_argument("--output", type=Path, required=True)
     sanitize.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
     sanitize.add_argument("--every", type=float, default=4.0)
 
     harden_cmd = sub.add_parser("harden", help="apply optional transcript-assisted hardening")
+    _add_verbose_option(harden_cmd)
     harden_cmd.add_argument("job", type=Path, help="baseline job directory")
     harden_cmd.add_argument("--transcript", type=_path, required=True)
     harden_cmd.add_argument("--job", dest="output_job", type=Path, required=True)
@@ -117,13 +134,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     render = sub.add_parser("render", help="render a job manifest")
+    _add_verbose_option(render)
     render.add_argument("job", type=Path)
     render.add_argument("--output", type=Path, required=True)
 
     report = sub.add_parser("report", help="print a job report")
+    _add_verbose_option(report)
     report.add_argument("job", type=Path)
 
     verify = sub.add_parser("verify", help="verify a rendered output")
+    _add_verbose_option(verify)
     verify.add_argument("job", type=Path)
     verify.add_argument("--output", type=Path, required=True)
     return parser
@@ -131,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.verbose:
+        os.environ["PRIV_SANITIZER_VERBOSE"] = "1"
     try:
         if args.command == "batch":
             print(json.dumps(

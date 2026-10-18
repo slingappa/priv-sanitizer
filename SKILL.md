@@ -49,7 +49,7 @@ explicitly select the Docker wrapper.
 
 The workflow has two passes:
 
-1. Baseline: video-only input. Preserve audio by default, blur participant visuals, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
+1. Baseline: video-only input. Preserve audio by default, blur participant visuals, skip the expensive audio scan unless explicitly enabled, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
 2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it as secondary evidence for names, speaker labels, and timing. Audio remains unchanged by default; `--experimental-audio` explicitly opts in to short matched-name mute windows. Do not rewrite or emit a sanitized transcript.
 
 The detector stack records local layout-model evidence, OCR evidence (Tesseract
@@ -59,10 +59,18 @@ silently treated as successful detection.
 
 Audio redaction is experimental and off by default. Enable it explicitly with
 `--experimental-audio` for `batch` or `harden`; otherwise audio is preserved.
+The full-length speech-activity scan is also off by default; enable it with
+`PRIV_SANITIZER_AUDIO_ANALYSIS=1` when diagnostic VAD evidence is needed.
+Audio-level verification follows the same opt-in policy while stream presence
+and duration checks remain enabled.
 
 Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Set
 `PRIV_SANITIZER_FFMPEG_THREADS` or `PRIV_SANITIZER_X264_PRESET` to override
 those defaults.
+
+For long conversions, pass `-v`/`--verbose`. Diagnostics and periodic
+heartbeats are written to `verbose.log` in the caller's working directory;
+`PRIV_SANITIZER_HEARTBEAT_SECONDS` controls the heartbeat interval.
 
 For staged work, read [references/workflow.md](references/workflow.md). For privacy decisions, read [references/policy.md](references/policy.md).
 

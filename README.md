@@ -72,6 +72,16 @@ are written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
 `--experimental-audio` to the launcher command to opt in to experimental
 transcript-based audio muting.
 
+For long conversions, add `-v` (or `--verbose`). This writes detailed command,
+stage, percentage, and heartbeat diagnostics to `VIDEO_DIR/verbose.log` while
+also showing them on stderr. Heartbeats default to every 15 seconds; override
+that with `PRIV_SANITIZER_HEARTBEAT_SECONDS`.
+
+```bash
+PRIV_SANITIZER_HEARTBEAT_SECONDS=5 \
+  "$tool_root/priv-sanitizer-docker" -v
+```
+
 The raw `docker run` form remains available for custom container workflows,
 but is not required for normal use.
 
@@ -122,8 +132,13 @@ python3 -m priv_sanitizer sanitize \
   --output "${VIDEO_DIR:-$PWD}/artifacts/input-baseline"
 ```
 
-The CLI reports progress for frame sampling, audio analysis, and video
-rendering. Set `PRIV_SANITIZER_QUIET=1` to suppress progress messages.
+The CLI reports progress for frame sampling, optional audio analysis, and video
+rendering. Audio analysis is skipped by default when audio is preserved, which
+avoids an unnecessary full-length decode on long recordings. Add
+`-v`/`--verbose` to write detailed diagnostics to
+`verbose.log`; set `PRIV_SANITIZER_QUIET=1` to suppress progress messages.
+The default verification still checks audio-stream presence and duration; full
+audio-level verification is included only when audio analysis is enabled.
 
 ## Batch mode
 
@@ -161,7 +176,11 @@ usage above 100% in the shell's `time` output confirms parallel execution;
 actual utilization may be limited by the container CPU quota, filters, or
 storage bandwidth.
 
-It detects a conservative participant-panel region and runs local layout/OCR/face detectors when available. Audio is preserved by default; speech activity is recorded as evidence only and is never used to mute an entire meeting.
+It detects a conservative participant-panel region and runs local layout/OCR/face detectors when available. Audio is preserved by default and audio
+analysis is skipped unless `--experimental-audio`, a non-preserve audio mode,
+or `PRIV_SANITIZER_AUDIO_ANALYSIS=1` is requested. When enabled, speech
+activity is recorded as evidence only and is never used to mute an entire
+meeting.
 
 ## Optional hardening
 
