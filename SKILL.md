@@ -52,6 +52,10 @@ The workflow has two passes:
 1. Baseline: video-only input. Preserve audio by default, blur participant visuals, skip the expensive audio scan unless explicitly enabled, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
 2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it as secondary evidence for names, speaker labels, and timing. Audio remains unchanged by default; `--experimental-audio` explicitly opts in to short matched-name mute windows. Do not rewrite or emit a sanitized transcript.
 
+When hardening does not change the render-relevant visual/audio redactions, the
+baseline encoded video is reused; a second encode is reserved for changed
+visual masks or experimental audio redaction.
+
 The detector stack records per-segment layout-model evidence, OCR evidence
 (Tesseract when installed), and face-detection evidence (OpenCV Haar when
 installed). It does not assume participants stay in a right-side rail: it

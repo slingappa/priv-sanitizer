@@ -219,6 +219,11 @@ command or pass `--experimental-audio` to `harden`. It does not mute all speech
 in a cue. For an extracted clip, pass the source timestamp offset with
 `--transcript-offset`.
 
+Batch mode still performs transcript hardening analysis, but reuses the
+baseline encoded video when hardening produces the same visual mask and audio
+remains preserved. A second encode is performed only when the transcript pass
+changes visual redactions or experimental audio muting is enabled.
+
 FFmpeg and FFprobe must be available on `PATH` or configured explicitly. Pillow is required. OCR uses
 `pytesseract` plus the `tesseract` executable when installed; face detection
 uses `opencv-python-headless` when installed. Both are optional, and their

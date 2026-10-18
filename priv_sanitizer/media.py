@@ -601,8 +601,13 @@ def detect_ocr_regions(
                     participant_position = relative_y >= 0.62 or (px < 0.20 and relative_y >= 0.45)
                     if confidence < 35 and not known_name:
                         continue
-                    if not panels and not known_name and not participant_position:
-                        continue
+                    if not panels and not known_name:
+                        # Bright full-frame OCR is commonly slide/UI text, not
+                        # a participant label.  Dark speaker/avatar scenes are
+                        # covered by the conservative full-frame fallback;
+                        # transcript-provided names remain accepted anywhere.
+                        if not participant_position or _mean_luma(frame) >= 80:
+                            continue
                     box = (
                         round(px + (x / max(crop.width, 1)) * pw, 6),
                         round(py + (y / max(crop.height, 1)) * ph, 6),

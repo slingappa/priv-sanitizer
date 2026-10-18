@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from unittest.mock import patch
 
 from priv_sanitizer import pipeline
@@ -36,6 +37,79 @@ def test_discovery_and_transcript_pairing(tmp_path):
     matched, warnings = pipeline.match_transcript(videos[1], transcripts, video_count=2)
     assert matched is None
     assert warnings
+
+
+def test_identical_hardening_redactions_can_reuse_baseline_render():
+    base = {
+        "audio_mode": "preserve",
+        "visual_redactions": [{
+            "id": "baseline-id", "kind": "participant_panel", "mode": "blur",
+            "box": [0.75, 0.0, 0.25, 1.0], "start": 0.0, "end": 10.0,
+        }],
+        "audio_redactions": [],
+    }
+    hardened = {
+        **base,
+        "visual_redactions": [{
+            "id": "transcript-id", "kind": "participant_panel", "mode": "blur",
+            "box": [0.75, 0.0, 0.25, 1.0], "start": 0.0, "end": 10.0,
+            "sources": ["transcript-assisted"],
+        }],
+    }
+    assert pipeline._can_reuse_baseline_render(base, hardened)
+    hardened["audio_mode"] = "mute-names"
+    assert not pipeline._can_reuse_baseline_render(base, hardened)
+
+
+def test_batch_reuses_baseline_encode_when_hardening_is_analysis_only(tmp_path):
+    video = tmp_path / "meeting.mp4"
+    transcript = tmp_path / "meeting.srt"
+    video.touch()
+    transcript.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    visual = [{
+        "id": "id", "kind": "participant_panel", "mode": "blur",
+        "box": [0.75, 0.0, 0.25, 1.0], "start": 0.0, "end": 1.0,
+    }]
+
+    def fake_baseline(source: Path, job: Path, **kwargs):
+        job.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "source": {"video": str(source)}, "audio_mode": "preserve",
+            "visual_redactions": visual, "audio_redactions": [],
+        }
+        (job / "redaction-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (job / "analysis.json").write_text("{}", encoding="utf-8")
+        (job / "probe.json").write_text("{}", encoding="utf-8")
+
+    def fake_render(job: Path, output_dir: Path, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "sanitized.mp4").write_bytes(b"baseline")
+        return {"verify": {"passed": True}}
+
+    def fake_harden(baseline_job: Path, transcript_path: Path, output_job: Path, **kwargs):
+        output_job.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "source": {"video": str(video)}, "audio_mode": "preserve",
+            "visual_redactions": [{**visual[0], "id": "hardened-id"}],
+            "audio_redactions": [],
+        }
+        (output_job / "redaction-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def fake_reuse(baseline_output: Path, hardened_job: Path, output_dir: Path, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "sanitized.mp4").write_bytes(b"baseline")
+        return {"verify": {"passed": True}, "reused_baseline": True}
+
+    with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
+        pipeline, "render_job", side_effect=fake_render
+    ) as render, patch.object(pipeline, "harden", side_effect=fake_harden), patch.object(
+        pipeline, "reuse_render_job", side_effect=fake_reuse
+    ) as reuse:
+        report = pipeline.batch(tmp_path, tmp_path / "outputs_sanitized")
+    assert report["completed_count"] == 1
+    assert render.call_count == 1
+    assert reuse.call_count == 1
+    assert report["results"][0]["hardened"]["reused_baseline"] is True
 
 
 def test_batch_runs_both_passes_and_writes_report(tmp_path):

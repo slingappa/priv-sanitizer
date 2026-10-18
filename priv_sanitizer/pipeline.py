@@ -302,6 +302,67 @@ def render_job(
     return {**result, "verify": verify}
 
 
+def _redaction_signature(manifest: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    """Return render-relevant redactions without detector IDs/evidence noise."""
+    signature: list[tuple[Any, ...]] = []
+    for item in manifest.get("visual_redactions", []):
+        signature.append((
+            "visual",
+            item.get("kind"),
+            item.get("mode", "blur"),
+            tuple(round(float(value), 5) for value in item.get("box", [])),
+            round(float(item.get("start", 0.0)), 3),
+            round(float(item.get("end", 0.0)), 3),
+        ))
+    for item in manifest.get("audio_redactions", []):
+        signature.append((
+            "audio",
+            round(float(item.get("start", 0.0)), 3),
+            round(float(item.get("end", 0.0)), 3),
+        ))
+    return tuple(sorted(signature))
+
+
+def _can_reuse_baseline_render(baseline: dict[str, Any], hardened: dict[str, Any]) -> bool:
+    """Avoid a second encode when hardening did not change the rendered mask."""
+    if baseline.get("audio_mode") != hardened.get("audio_mode"):
+        return False
+    return _redaction_signature(baseline) == _redaction_signature(hardened)
+
+
+def reuse_render_job(
+    baseline_output: Path,
+    hardened_job: Path,
+    hardened_output_dir: Path,
+    *,
+    verify_audio: bool | None = None,
+) -> dict[str, Any]:
+    """Materialize a hardened artifact by reusing an identical baseline encode."""
+    _status("reusing baseline render; transcript hardening did not change redactions")
+    manifest = read_json(hardened_job / "redaction-manifest.json")
+    source = Path(manifest["source"]["video"])
+    hardened_output_dir.mkdir(parents=True, exist_ok=True)
+    output = hardened_output_dir / "sanitized.mp4"
+    shutil.copy2(baseline_output, output)
+    if verify_audio is None:
+        verify_audio = (
+            manifest.get("audio_mode") != "preserve"
+            or os.environ.get("PRIV_SANITIZER_AUDIO_ANALYSIS", "").lower() in {"1", "true", "yes", "on"}
+        )
+    verify = verify_output(source, output, audio_metrics=verify_audio)
+    result = {
+        "output": str(output),
+        "visual_filters": len(manifest.get("visual_redactions", [])),
+        "audio_filters": len(manifest.get("audio_redactions", [])),
+        "audio_mode": manifest.get("audio_mode"),
+        "render_seconds": 0.0,
+        "reused_baseline": True,
+        "verify": verify,
+    }
+    write_json(hardened_output_dir / "render.json", result)
+    return result
+
+
 def batch(
     input_dir: Path,
     output_dir: Path,
@@ -374,11 +435,25 @@ def batch(
                         narrow_audio=experimental_audio,
                         transcript_offset=0.0,
                     )
-                    hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
+                    baseline_manifest_path = baseline_job / "redaction-manifest.json"
+                    hardened_manifest_path = hardened_job / "redaction-manifest.json"
+                    if baseline_manifest_path.exists() and hardened_manifest_path.exists() and _can_reuse_baseline_render(
+                        read_json(baseline_manifest_path), read_json(hardened_manifest_path)
+                    ):
+                        hardened_render = reuse_render_job(
+                            baseline_dir / "sanitized.mp4",
+                            hardened_job,
+                            hardened_dir,
+                            verify_audio=experimental_audio,
+                        )
+                    else:
+                        _status("hardening changed render redactions; rendering hardened output")
+                        hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
                     entry["hardened"] = {
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
                         "output": str((hardened_dir / "sanitized.mp4").resolve()),
                         "verify": hardened_render["verify"],
+                        "reused_baseline": hardened_render.get("reused_baseline", False),
                     }
                     if hardened_render["verify"]["passed"]:
                         final_source = hardened_dir / "sanitized.mp4"
