@@ -167,7 +167,15 @@ Detailed artifacts are under `artifacts/<video-stem>/`, with `baseline/`,
 optional `hardened/`, and `artifacts/batch-report.json`.
 
 FFmpeg rendering defaults to 8 threads and the `ultrafast` x264 preset for a
-fast run on an 8-core machine. Override them with
+fast run on an 8-core machine. Override the CPU count per run with `-j N` (or
+`--jobs N`), or use the environment variable for launcher integrations:
+
+```bash
+priv-sanitizer -j 4
+```
+
+The `-j` value controls FFmpeg, filter, and x264 thread counts. You can also
+override them with
 `PRIV_SANITIZER_FFMPEG_THREADS` and `PRIV_SANITIZER_X264_PRESET` when using a
 different machine or sharing CPU resources. OCR and face analysis are also
 dispatched concurrently. More threads are not always faster when another

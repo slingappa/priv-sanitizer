@@ -13,6 +13,11 @@ def test_no_args_defaults_to_batch_in_current_directory(tmp_path, monkeypatch):
     assert args.output == tmp_path / "outputs_sanitized"
 
 
+def test_jobs_option_accepts_global_and_batch_forms():
+    assert build_parser().parse_args(["-j", "3"]).jobs == 3
+    assert build_parser().parse_args(["batch", "--jobs", "5"]).jobs == 5
+
+
 def test_discovery_and_transcript_pairing(tmp_path):
     first = tmp_path / "Meeting A.MP4"
     second = tmp_path / "meeting-b.mov"

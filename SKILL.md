@@ -64,9 +64,10 @@ The full-length speech-activity scan is also off by default; enable it with
 Audio-level verification follows the same opt-in policy while stream presence
 and duration checks remain enabled.
 
-Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Set
-`PRIV_SANITIZER_FFMPEG_THREADS` or `PRIV_SANITIZER_X264_PRESET` to override
-those defaults.
+Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Use
+`-j N`/`--jobs N` to select the CPU/thread count for a run, or set
+`PRIV_SANITIZER_FFMPEG_THREADS` and `PRIV_SANITIZER_X264_PRESET` to override
+those defaults through an integration.
 
 Diagnostics and periodic heartbeats are enabled by default and written to
 `verbose.log` in the caller's working directory. `-v`/`--verbose` explicitly
