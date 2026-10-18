@@ -469,6 +469,9 @@ def batch(
             # exposing a simple flat final-file contract for batch callers:
             # output_dir/<input-stem>.mp4.
             final_output = output_dir / f"{output_key}.mp4"
+            # A prior per-video failure or an external cleanup process must not
+            # remove the delivery directory for later videos in the batch.
+            final_output.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(final_source, final_output)
             entry["final_output"] = str(final_output.resolve())
             entry["status"] = "completed" if entry["baseline"]["status"] == "completed" else "failed"
