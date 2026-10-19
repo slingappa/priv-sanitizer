@@ -7,8 +7,9 @@ by default.
 
 > [!WARNING]
 > This is an assistive redaction tool, not proof of complete
-> de-identification. Review the rendered video and audit artifacts before
-> distributing it.
+> de-identification. Review the rendered video before distributing it; use
+> `-k`/`--keep-artifacts` when audit artifacts are needed for review or
+> debugging.
 
 ## What it does
 
@@ -21,8 +22,8 @@ by default.
   solid fill.
 - Preserves audio by default. Experimental transcript-guided name muting is
   opt-in.
-- Produces a simple delivery copy plus inspectable analysis and render
-  artifacts.
+- Produces a simple delivery copy, with optional inspectable analysis and
+  render artifacts when `-k`/`--keep-artifacts` is requested.
 
 ## Quick start — Docker (recommended)
 
@@ -50,10 +51,17 @@ recordings/
 ├── meeting.docx                 # optional matching transcript
 ├── outputs_sanitized/
 │   └── meeting.mp4              # delivery copy
-├── artifacts/
-│   ├── meeting/                  # analysis and render audit data
-│   └── batch-report.json
 └── verbose.log                  # operational diagnostics
+```
+
+Batch mode removes generated `artifacts/` contents by default after the
+delivery copy is verified. Add `-k`/`--keep-artifacts` when you need the
+analysis manifests, reports, and rendered audit copies for debugging:
+
+```text
+artifacts/
+├── meeting/
+└── batch-report.json
 ```
 
 The Docker wrapper is also available directly:
@@ -66,13 +74,12 @@ cd "$VIDEO_DIR"
 It mounts the current folder as `/work`, preserves output ownership, and
 avoids requiring users to write a `docker run` command.
 
-The flat delivery video is always retained. Batch mode removes intermediate
-per-pass `sanitized.mp4` files from `artifacts/` by default, while keeping the
-small JSON/TXT traceability files. Add `-k`/`--keep-videos` when you explicitly
-need those additional artifact videos:
+The flat delivery video is always retained. Batch mode removes all generated
+artifacts by default. Add `-k`/`--keep-artifacts` when you explicitly need
+those files for debugging; `--keep-videos` remains a compatibility alias:
 
 ```bash
-"$TOOL_DIR/priv-sanitizer" -k
+"$TOOL_DIR/priv-sanitizer" --keep-artifacts
 ```
 
 ## Quick start — native Python
@@ -119,11 +126,12 @@ The equivalent explicit form is:
   --artifacts ./artifacts
 ```
 
-Use `-k`/`--keep-videos` with batch mode to retain the generated final-pass MP4
-under `artifacts/<stem>/`; without it, only the selected flat delivery copy
-under `outputs_sanitized/` is kept. When a transcript is paired, baseline and
-hardened analysis both finish before one transcript-aware encode; the baseline
-artifact contains analysis only unless it is needed as a fallback.
+Use `-k`/`--keep-artifacts` with batch mode to retain generated audit artifacts
+under `artifacts/<stem>/`; `--keep-videos` is a compatibility alias. Without
+`-k`, only the selected flat delivery copy under `outputs_sanitized/` remains.
+When a transcript is paired, baseline and hardened analysis both finish before
+one transcript-aware encode; the baseline artifact contains analysis only
+unless it is needed as a fallback.
 Explicit `sanitize` and `render` commands retain the video in the output
 directory you choose because that directory is an intentional direct output.
 
@@ -219,7 +227,7 @@ and review-required regions are recorded in `analysis.json` and
 
 ## Review before sharing
 
-Always inspect the output and these artifacts:
+Always inspect the output. If you used `-k`, also inspect these audit artifacts:
 
 - `outputs_sanitized/<stem>.mp4` — the delivery copy.
 - `artifacts/<stem>/baseline/job/analysis.json` — detector evidence and
@@ -293,8 +301,9 @@ source "$TOOL_DIR/scripts/activate.sh"
   diagnostic comparison. Threshold and clustering are controlled by
   `PRIV_SANITIZER_SCENE_THRESHOLD` and
   `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
-- `-k`/`--keep-videos` retains the final-pass artifact MP4; omit it to reduce
-  storage use during batch processing.
+- `-k`/`--keep-artifacts` retains generated audit artifacts for debugging;
+  `--keep-videos` is a compatibility alias. Omit it to remove artifacts after
+  delivery verification and minimize storage use.
 
 A typical long-running batch prints concise stage updates like this. In an
 interactive terminal, the progress line is refreshed in place; the Braille

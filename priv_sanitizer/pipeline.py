@@ -302,29 +302,14 @@ def render_job(
     return {**result, "verify": verify}
 
 
-def _mark_artifact_video_retention(output_dir: Path, retained: bool) -> None:
-    """Record whether the rendered artifact MP4 remains on disk."""
-    metadata_path = output_dir / "render.json"
-    if not metadata_path.exists():
-        return
-    try:
-        metadata = read_json(metadata_path)
-    except (OSError, ValueError, TypeError):
-        return
-    metadata["artifact_video_retained"] = retained
-    write_json(metadata_path, metadata)
-
-
-def _discard_artifact_video(output_dir: Path) -> None:
-    """Remove only the generated per-pass MP4, preserving audit metadata."""
-    video_path = output_dir / "sanitized.mp4"
-    try:
-        video_path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        _status(f"warning: could not remove artifact video {video_path}: {exc}")
-    _mark_artifact_video_retention(output_dir, False)
+def _discard_artifact_tree(video_root: Path, artifacts_dir: Path) -> None:
+    """Remove one generated batch artifact tree, never an arbitrary parent."""
+    root = video_root.resolve()
+    parent = artifacts_dir.resolve()
+    if root.parent != parent:
+        raise ValueError(f"refusing to remove artifact path outside batch root: {root}")
+    if root.exists():
+        shutil.rmtree(root)
 
 
 def _redaction_signature(manifest: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
@@ -394,10 +379,16 @@ def batch(
     *,
     artifacts_dir: Path | None = None,
     experimental_audio: bool = False,
-    keep_videos: bool = False,
+    keep_artifacts: bool = False,
+    keep_videos: bool | None = None,
     every: float = 4.0,
 ) -> dict[str, Any]:
     """Run baseline plus optional transcript hardening for every local video."""
+    # ``keep_videos`` is retained as a Python API compatibility alias. The
+    # batch retention decision now covers all generated audit artifacts, not
+    # only MP4s, because those files can still consume substantial storage.
+    if keep_videos is not None:
+        keep_artifacts = keep_videos
     input_dir = input_dir.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
     artifacts_dir = (artifacts_dir or output_dir.parent / "artifacts").expanduser().resolve()
@@ -445,7 +436,8 @@ def batch(
                 "status": "completed",
                 "rendered": False,
                 "output": None,
-                "artifact_video_retained": False,
+                "artifact_video_retained": keep_artifacts,
+                "artifacts_retained": keep_artifacts,
             }
 
             if transcript:
@@ -470,7 +462,8 @@ def batch(
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
                         "rendered": True,
                         "output": str((hardened_dir / "sanitized.mp4").resolve()),
-                        "artifact_video_retained": keep_videos,
+                        "artifact_video_retained": keep_artifacts,
+                        "artifacts_retained": keep_artifacts,
                         "verify": hardened_render["verify"],
                     }
                     if hardened_render["verify"]["passed"]:
@@ -491,7 +484,8 @@ def batch(
                     "status": "completed" if baseline_render["verify"]["passed"] else "failed",
                     "rendered": True,
                     "output": str((baseline_dir / "sanitized.mp4").resolve()),
-                    "artifact_video_retained": keep_videos,
+                    "artifact_video_retained": keep_artifacts,
+                    "artifacts_retained": keep_artifacts,
                     "verify": baseline_render["verify"],
                 }
                 final_source = baseline_dir / "sanitized.mp4"
@@ -514,12 +508,11 @@ def batch(
             entry["error"] = str(exc)
             _status(f"batch {index}/{len(videos)}: failed {video.name}: {exc}")
         finally:
-            if not keep_videos:
+            if not keep_artifacts:
                 # The flat output has already been copied when processing
-                # succeeds. Keep JSON/TXT manifests and reports, but avoid
-                # retaining another full encoded video under artifacts.
-                _discard_artifact_video(baseline_dir)
-                _discard_artifact_video(video_root / "hardened")
+                # succeeds. Remove the complete generated audit tree unless
+                # the caller explicitly requested it for debugging.
+                _discard_artifact_tree(video_root, artifacts_dir)
         results.append(entry)
 
     report = {
@@ -529,14 +522,31 @@ def batch(
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
         "experimental_audio_redaction": experimental_audio,
-        "keep_artifact_videos": keep_videos,
+        "keep_artifacts": keep_artifacts,
+        # Deprecated report key retained for consumers of older reports.
+        "keep_artifact_videos": keep_artifacts,
         "video_count": len(videos),
         "completed_count": sum(item.get("status") == "completed" for item in results),
         "failed_count": sum(item.get("status") == "failed" for item in results),
         "results": results,
         "warnings": ["no supported videos found"] if not videos else [],
     }
-    write_json(artifacts_dir / "batch-report.json", report)
+    batch_report = artifacts_dir / "batch-report.json"
+    if keep_artifacts:
+        write_json(batch_report, report)
+    else:
+        # A default batch leaves delivery files only. Remove a report from a
+        # prior default run as well, since it is generated audit data.
+        try:
+            batch_report.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            artifacts_dir.rmdir()
+        except OSError:
+            # Keep a caller-owned/non-empty directory intact. The generated
+            # per-video trees and report have already been removed above.
+            pass
     return report
 
 

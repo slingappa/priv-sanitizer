@@ -34,13 +34,12 @@ cd "$video_dir"
 ```
 
 Each recording gets a flat final file at
-`outputs_sanitized/<video-stem>.mp4`, small traceability artifacts under
-`artifacts/<video-stem>/baseline/` and optional `hardened/`, and the overall
-`artifacts/batch-report.json`. Generated artifact MP4s are removed from
-`artifacts/` by default to avoid filling storage; pass `-k`/`--keep-videos`
-when the final-pass artifact video is specifically needed. Same-stem
-DOCX/SRT/VTT files are paired automatically; a transcript is never required
-for baseline processing and is not rewritten or emitted.
+`outputs_sanitized/<video-stem>.mp4`. Batch removes generated `artifacts/`
+contents by default after delivery verification; pass `-k`/`--keep-artifacts`
+to retain manifests, reports, and audit videos for debugging. The legacy
+`--keep-videos` spelling remains an alias. Same-stem DOCX/SRT/VTT files are
+paired automatically; a transcript is never required for baseline processing
+and is not rewritten or emitted.
 
 For a new machine, run `bash scripts/install.sh` and then
 `source scripts/activate.sh` first. The installer provisions the Python
@@ -88,4 +87,7 @@ heartbeats are log-only. `-v`/`--verbose` explicitly forces this mode, `PRIV_SAN
 
 For staged work, read [references/workflow.md](references/workflow.md). For privacy decisions, read [references/policy.md](references/policy.md).
 
-Always review `redaction-manifest.json` and `report.txt` before treating the output as sanitized. Report unresolved visual or audio coverage instead of claiming complete privacy.
+Always review the rendered delivery before treating it as sanitized. When
+`-k`/`--keep-artifacts` is used, also review `redaction-manifest.json` and
+`report.txt`; report unresolved visual or audio coverage instead of claiming
+complete privacy.

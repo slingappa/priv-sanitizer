@@ -25,14 +25,13 @@ priv-sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifa
 ```
 
 Every video gets a baseline pass. A same-stem `.docx`, `.srt`, or `.vtt`
-transcript triggers the optional hardening pass. The final selected video and
-small per-pass audit artifacts are stored under `artifacts/<video-stem>/`, the
-flat final video is `outputs_sanitized/<video-stem>.mp4`, and the batch summary
-is `artifacts/batch-report.json`. Intermediate per-pass MP4s are removed from
-`artifacts/` by default; pass `-k`/`--keep-videos` to retain the generated
-final-pass MP4. When a transcript is paired, baseline and hardening analysis
-finish before one final transcript-aware render; the baseline render is only a
-fallback if hardening fails.
+transcript triggers the optional hardening pass. The final selected video is
+`outputs_sanitized/<video-stem>.mp4`. Generated `artifacts/` contents are
+removed by default; pass `-k`/`--keep-artifacts` to retain audit data for
+debugging (`--keep-videos` is a compatibility alias). When a transcript is
+paired, baseline and hardening analysis finish before one final
+transcript-aware render; the baseline render is only a fallback if hardening
+fails.
 
 Audio is preserved by default. To opt in to experimental transcript-based name
 muting, add `--experimental-audio` to the batch command.
