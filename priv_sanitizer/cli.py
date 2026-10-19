@@ -262,3 +262,6 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(result, indent=2))
     except ToolError as exc:
         raise SystemExit(f"error: {exc}") from exc
+    except KeyboardInterrupt:
+        print("[priv-sanitizer] interrupted; stopping without publishing an incomplete output", file=os.sys.stderr)
+        raise SystemExit(130)

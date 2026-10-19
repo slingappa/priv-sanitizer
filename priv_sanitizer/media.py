@@ -123,6 +123,24 @@ def _progress_status(stage: str, percent: int, *, final: bool = False) -> None:
         print(message, file=stream, flush=True)
 
 
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """Stop a child process promptly when the user cancels a run."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=2.0)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def run(
     args: list[str], *, capture: bool = True, progress_stage: str | None = None,
     duration: float | None = None,
@@ -160,51 +178,56 @@ def run(
         # slower configured cadence in both modes.
         spinner_interval = min(heartbeat, _PROGRESS_SPINNER_INTERVAL) if os.sys.stderr.isatty() else heartbeat
         last_heartbeat_log_at = started
-        while selector.get_map():
-            events = selector.select(timeout=spinner_interval)
-            if not events:
-                if process.poll() is None:
+        try:
+            while selector.get_map():
+                events = selector.select(timeout=spinner_interval)
+                if not events:
+                    if process.poll() is None:
+                        now = time.perf_counter()
+                        elapsed = time.perf_counter() - started
+                        quiet_for = time.perf_counter() - last_progress_at
+                        if last_percent >= 0 and now - last_status_at >= spinner_interval:
+                            _progress_status(progress_stage, last_percent)
+                            last_status_at = now
+                        if now - last_heartbeat_log_at >= heartbeat:
+                            _verbose(
+                                f"{progress_stage} still running after {elapsed:.0f}s "
+                                f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
+                            )
+                            last_heartbeat_log_at = now
+                    continue
+                for key, _ in events:
+                    line = key.fileobj.readline()
+                    if not line:
+                        selector.unregister(key.fileobj)
+                        continue
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if key.data == "stderr":
+                        stderr_lines.append(line)
+                        continue
+                    stdout_lines.append(line)
+                    match = re.match(r"out_time_ms=(\d+)", line)
+                    if match and duration and duration > 0:
+                        last_progress_at = time.perf_counter()
+                        percent = min(99, int((int(match.group(1)) / 1_000_000) / duration * 100))
+                        if percent != last_percent:
+                            _progress_status(progress_stage, percent)
+                            last_percent = percent
+                            last_status_at = time.perf_counter()
+                # Some FFmpeg filters emit diagnostics continuously while their
+                # encoded timestamp remains unchanged. Keep the spinner moving in
+                # that case too, without pretending that percentage advanced.
+                if process.poll() is None and last_percent >= 0:
                     now = time.perf_counter()
-                    elapsed = time.perf_counter() - started
-                    quiet_for = time.perf_counter() - last_progress_at
-                    if last_percent >= 0 and now - last_status_at >= spinner_interval:
+                    if now - last_status_at >= spinner_interval:
                         _progress_status(progress_stage, last_percent)
                         last_status_at = now
-                    if now - last_heartbeat_log_at >= heartbeat:
-                        _verbose(
-                            f"{progress_stage} still running after {elapsed:.0f}s "
-                            f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
-                        )
-                        last_heartbeat_log_at = now
-                continue
-            for key, _ in events:
-                line = key.fileobj.readline()
-                if not line:
-                    selector.unregister(key.fileobj)
-                    continue
-                line = line.strip()
-                if not line:
-                    continue
-                if key.data == "stderr":
-                    stderr_lines.append(line)
-                    continue
-                stdout_lines.append(line)
-                match = re.match(r"out_time_ms=(\d+)", line)
-                if match and duration and duration > 0:
-                    last_progress_at = time.perf_counter()
-                    percent = min(99, int((int(match.group(1)) / 1_000_000) / duration * 100))
-                    if percent != last_percent:
-                        _progress_status(progress_stage, percent)
-                        last_percent = percent
-                        last_status_at = time.perf_counter()
-            # Some FFmpeg filters emit diagnostics continuously while their
-            # encoded timestamp remains unchanged. Keep the spinner moving in
-            # that case too, without pretending that percentage advanced.
-            if process.poll() is None and last_percent >= 0:
-                now = time.perf_counter()
-                if now - last_status_at >= spinner_interval:
-                    _progress_status(progress_stage, last_percent)
-                    last_status_at = now
+        except KeyboardInterrupt:
+            _terminate_process(process)
+            selector.close()
+            raise
         selector.close()
         stderr = "\n".join(stderr_lines)
         returncode = process.wait()
@@ -227,6 +250,9 @@ def run(
             raise ToolError(str(exc)) from exc
         try:
             stdout, stderr = process.communicate(timeout=_heartbeat_seconds())
+        except KeyboardInterrupt:
+            _terminate_process(process)
+            raise
         except subprocess.TimeoutExpired:
             while True:
                 elapsed = time.perf_counter() - started
@@ -234,6 +260,9 @@ def run(
                 try:
                     stdout, stderr = process.communicate(timeout=_heartbeat_seconds())
                     break
+                except KeyboardInterrupt:
+                    _terminate_process(process)
+                    raise
                 except subprocess.TimeoutExpired:
                     continue
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
@@ -1075,6 +1104,14 @@ def _blur_filter_graph(visual: list[dict[str, Any]]) -> tuple[str, str]:
 
 def render(video: Path, manifest: dict[str, Any], output: Path) -> dict[str, Any]:
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Encode into a same-directory temporary path and publish atomically only
+    # after FFmpeg completes. Ctrl+C or an encoding failure can therefore not
+    # leave a truncated file at the user-facing output path.
+    partial_output = output.with_name(f".{output.stem}.{os.getpid()}.part{output.suffix}")
+    try:
+        partial_output.unlink()
+    except FileNotFoundError:
+        pass
     visual = manifest.get("visual_redactions", [])
     audio = manifest.get("audio_redactions", [])
     args = [_tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(video)]
@@ -1103,13 +1140,21 @@ def render(video: Path, manifest: dict[str, Any], output: Path) -> dict[str, Any
         args += ["-c:a", "copy"]
     else:
         args += ["-c:a", "aac", "-b:a", "128k"]
-    args += ["-map_metadata", "-1", "-movflags", "+faststart", str(output)]
+    args += ["-map_metadata", "-1", "-movflags", "+faststart", str(partial_output)]
     render_started = time.perf_counter()
-    run(
-        args,
-        progress_stage="rendering video",
-        duration=float(manifest.get("video", {}).get("duration") or 0),
-    )
+    try:
+        run(
+            args,
+            progress_stage="rendering video",
+            duration=float(manifest.get("video", {}).get("duration") or 0),
+        )
+        os.replace(partial_output, output)
+    except BaseException:
+        try:
+            partial_output.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return {
         "output": str(output),
         "visual_filters": len(visual),
