@@ -1,260 +1,284 @@
 # priv-sanitizer
 
-Local-first meeting-video privacy sanitizer with a video-only baseline pass and an optional transcript-assisted hardening pass.
+`priv-sanitizer` is a local-first tool for protecting participant privacy in
+meeting recordings. It detects participant tiles, camera feeds, avatars, and
+visible names, then blurs the video while preserving shared content and audio
+by default.
 
-## Quick start
+> [!WARNING]
+> This is an assistive redaction tool, not proof of complete
+> de-identification. Review the rendered video and audit artifacts before
+> distributing it.
 
-Run these commands from the folder containing the videos. Set `VIDEO_DIR` if
-the recordings are stored elsewhere.
+## What it does
+
+- Works with a video alone; a transcript is optional secondary evidence.
+- Detects changing meeting layouts, including participant rails, grids, and
+  full-screen speakers or avatars.
+- Uses OCR and face detection when available, with conservative layout
+  fallbacks when they are not.
+- Blurs participant images and visible names instead of replacing them with a
+  solid fill.
+- Preserves audio by default. Experimental transcript-guided name muting is
+  opt-in.
+- Produces a simple delivery copy plus inspectable analysis and render
+  artifacts.
+
+## Quick start — Docker (recommended)
+
+Run these commands from the folder that contains the recordings. Set
+`VIDEO_DIR` first if the recordings are somewhere else.
 
 ```bash
 export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
+export TOOL_DIR="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
 
-git clone https://github.com/slingappa/priv-sanitizer.git "$HOME/tools/priv-sanitizer"
-cd "$HOME/tools/priv-sanitizer"
-bash scripts/install.sh
-source scripts/activate.sh
-
-cd "$VIDEO_DIR"
-"$HOME/tools/priv-sanitizer/priv-sanitizer"
-```
-
-The no-argument batch run discovers videos in `VIDEO_DIR`. Final sanitized
-files are written to `VIDEO_DIR/outputs_sanitized/`; audit manifests, reports,
-and intermediate pass outputs are written to `VIDEO_DIR/artifacts/`.
-
-For usage examples after installation:
-
-```bash
-priv-sanitizer --help
-priv-sanitizer batch --help
-```
-
-For a Docker-only installation, skip host Python setup and let the installer
-build the image and configure the launcher to use it:
-
-```bash
-cd "$HOME/tools/priv-sanitizer"
+git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
+cd "$TOOL_DIR"
 bash scripts/install.sh --docker-only
+
 cd "$VIDEO_DIR"
-"$HOME/tools/priv-sanitizer/priv-sanitizer-docker"
+"$TOOL_DIR/priv-sanitizer"
 ```
 
-Use `PRIV_SANITIZER_USE_DOCKER=0` before a launcher invocation to temporarily
-force the local Python runtime, or `PRIV_SANITIZER_USE_DOCKER=1` to require the
-configured Docker image.
+The no-argument launcher batches every supported video in the current folder.
+It automatically uses the configured Docker image after `--docker-only`:
 
-## Docker quick start
-
-Docker packages Python, FFmpeg, Tesseract, OpenCV, and the sanitizer runtime
-into one image. The recommended setup is `bash scripts/install.sh
---docker-only`; to build manually instead:
-
-```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
-video_dir="${VIDEO_DIR:-$PWD}"
-cd "$tool_root"
-docker build -t priv-sanitizer:local .
+```text
+recordings/
+├── meeting.mp4
+├── meeting.docx                 # optional matching transcript
+├── outputs_sanitized/
+│   └── meeting.mp4              # delivery copy
+├── artifacts/
+│   ├── meeting/                  # analysis and render audit data
+│   └── batch-report.json
+└── verbose.log                  # operational diagnostics
 ```
 
-Run it from the folder containing the videos:
+The Docker wrapper is also available directly:
 
 ```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
-video_dir="${VIDEO_DIR:-$PWD}"
-cd "$video_dir"
-"$tool_root/priv-sanitizer-docker"
+cd "$VIDEO_DIR"
+"$TOOL_DIR/priv-sanitizer-docker"
 ```
 
-The Docker launcher uses the same no-argument batch behavior: final videos
-are written to `VIDEO_DIR/outputs_sanitized/` and audit artifacts to
-`VIDEO_DIR/artifacts/`. Audio remains preserved by default. Add
-`--experimental-audio` to the launcher command to opt in to experimental
-transcript-based audio muting.
+It mounts the current folder as `/work`, preserves output ownership, and
+avoids requiring users to write a `docker run` command.
 
-Detailed command, stage, percentage, and heartbeat diagnostics are enabled by
-default and written to `VIDEO_DIR/verbose.log`; detailed FFmpeg command lines
-and heartbeat messages are not printed to the terminal.
-`-v` (or `--verbose`) explicitly forces the same mode. Heartbeats default to
-every 15 seconds; override that with `PRIV_SANITIZER_HEARTBEAT_SECONDS`.
-Set `PRIV_SANITIZER_VERBOSE=0` to disable the log, or
-`PRIV_SANITIZER_QUIET=1` to suppress diagnostics entirely.
+## Quick start — native Python
+
+Use the native runtime instead of Docker when you prefer a local virtual
+environment:
 
 ```bash
-PRIV_SANITIZER_HEARTBEAT_SECONDS=5 \
-  "$tool_root/priv-sanitizer-docker" -v
-```
+export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
+export TOOL_DIR="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
 
-The raw `docker run` form remains available for custom container workflows,
-but is not required for normal use.
-
-## Baseline
-
-### Installation
-
-On Debian/Ubuntu, install the complete runtime—including FFmpeg, FFprobe,
-Tesseract OCR, OpenCV, and the Python environment—with:
-
-```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
-cd "$tool_root"
+git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
+cd "$TOOL_DIR"
 bash scripts/install.sh
 source scripts/activate.sh
+
+cd "$VIDEO_DIR"
+PRIV_SANITIZER_USE_DOCKER=0 "$TOOL_DIR/priv-sanitizer"
 ```
 
-After installation, use the repository-local launcher to avoid repeating the
-Python module invocation:
+After either installation, inspect copy-paste examples with:
 
 ```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
-video_dir="${VIDEO_DIR:-$PWD}"
-"$tool_root/priv-sanitizer" --help
-cd "$video_dir"
-"$tool_root/priv-sanitizer"
+"$TOOL_DIR/priv-sanitizer" --help
+"$TOOL_DIR/priv-sanitizer" batch --help
 ```
 
-It automatically uses the project virtual environment and local
-FFmpeg/Tesseract configuration while preserving the caller's current directory
-for batch input. With no arguments, it explicitly runs
-`batch --input "$PWD" --output "$PWD/outputs_sanitized" --artifacts
-"$PWD/artifacts"`. Run `priv-sanitizer --help` for copy-paste examples.
+## Everyday use
 
-The installer creates `.venv/` inside the tool directory. Use
-`bash scripts/install.sh --dry-run` to inspect actions, or
-`--no-system-packages` when FFmpeg and Tesseract are already installed on
-`PATH`. When passwordless `sudo` is unavailable, the installer can extract a
-project-local Tesseract runtime under `.tools/tesseract`; the activation
-script sets its binary, library, and language-data paths. It also honors
-`PRIV_SANITIZER_FFMPEG_DIR` for a project-local FFmpeg installation.
+### Batch a folder
 
-The baseline does not require a transcript:
+From the recordings folder, the shortest command is:
 
 ```bash
-python3 -m priv_sanitizer sanitize \
-  --video "${VIDEO_DIR:-$PWD}/input.mp4" \
-  --output "${VIDEO_DIR:-$PWD}/artifacts/input-baseline"
+"$TOOL_DIR/priv-sanitizer"
 ```
 
-The CLI reports progress for frame sampling, optional audio analysis, and video
-rendering. Audio analysis is skipped by default when audio is preserved, which
-avoids an unnecessary full-length decode on long recordings. Detailed
-diagnostics are logged by default; `-v`/`--verbose` explicitly enables them,
-while `PRIV_SANITIZER_VERBOSE=0` disables the log.
-The default verification still checks audio-stream presence and duration; full
-audio-level verification is included only when audio analysis is enabled.
-
-## Batch mode
-
-From a folder containing videos and optional same-stem transcripts, run the
-launcher with no arguments:
+The equivalent explicit form is:
 
 ```bash
-tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
-video_dir="${VIDEO_DIR:-$PWD}"
-cd "$video_dir"
-"$tool_root/priv-sanitizer"
+"$TOOL_DIR/priv-sanitizer" batch \
+  --input . \
+  --output ./outputs_sanitized \
+  --artifacts ./artifacts
 ```
 
-This is equivalent to `python3 -m priv_sanitizer batch --input . --output
-./outputs_sanitized --artifacts ./artifacts`. It scans only that folder for `.mp4`, `.mov`, `.avi`, `.mkv`,
-`.webm`, and `.m4v` files. Each video receives a video-only baseline pass. If
-there is an unambiguous same-stem `.docx`, `.srt`, or `.vtt` transcript, the
-optional hardening pass runs afterward and becomes the selected final output.
-Missing or ambiguous transcripts do not block baseline processing. Audio is
-preserved by default, including when transcript hardening runs.
+Discovery is non-recursive. Videos may be MP4, MOV, AVI, MKV, WEBM, or M4V;
+transcripts may be DOCX, SRT, or VTT. A same-stem transcript is paired
+automatically. Missing or ambiguous transcripts never block the video-only
+pass.
 
-Final files are written directly as `outputs_sanitized/<video-stem>.mp4`.
-Detailed artifacts are under `artifacts/<video-stem>/`, with `baseline/`,
-optional `hardened/`, and `artifacts/batch-report.json`.
-
-FFmpeg rendering defaults to 8 threads and the `ultrafast` x264 preset for a
-fast run on an 8-core machine. Override the CPU count per run with `-j N` (or
-`--jobs N`), or use the environment variable for launcher integrations:
+### Sanitize one video
 
 ```bash
-priv-sanitizer -j 4
+cd "$VIDEO_DIR"
+"$TOOL_DIR/priv-sanitizer" sanitize \
+  --video meeting.mp4 \
+  --output artifacts/meeting-baseline
 ```
 
-The `-j` value controls FFmpeg, filter, and x264 thread counts. You can also
-override them with
-`PRIV_SANITIZER_FFMPEG_THREADS` and `PRIV_SANITIZER_X264_PRESET` when using a
-different machine or sharing CPU resources. OCR and face analysis are also
-dispatched concurrently. More threads are not always faster when another
-FFmpeg job is running.
+This creates `artifacts/meeting-baseline/sanitized.mp4` and its job manifest.
+The command works with either launcher when paths are relative to the current
+recordings folder.
 
-The render metadata records the selected thread count and x264 preset. CPU
-usage above 100% in the shell's `time` output confirms parallel execution;
-actual utilization may be limited by the container CPU quota, filters, or
-storage bandwidth.
+### Use a transcript for hardening
 
-It detects participant regions per sampled time segment rather than assuming a
-permanent right-side rail. Full-screen speaker/avatar views and faces in
-arbitrary grid/tile positions are scanned across the whole recording; the
-render manifest records their time-bounded boxes. Audio is preserved by default
-and audio analysis is skipped unless `--experimental-audio`, a non-preserve audio mode,
-or `PRIV_SANITIZER_AUDIO_ANALYSIS=1` is requested. When enabled, speech
-activity is recorded as evidence only and is never used to mute an entire
-meeting.
-
-Sampling always includes an explicit decode of the source's first frame before
-periodic samples, so a participant visible at `t=0` is covered by the first
-temporal redaction interval.
-
-In addition to the coarse cadence, the baseline performs a lightweight
-FFmpeg scene-change pass and adds the first/last frame around each clustered
-transition to OCR, face, and layout analysis. This catches brief Meet layout
-changes without decoding every frame at high resolution. Override the defaults
-with `PRIV_SANITIZER_SCENE_THRESHOLD` and
-`PRIV_SANITIZER_SCENE_MERGE_SECONDS`, or disable the trigger layer for a
-diagnostic comparison with `PRIV_SANITIZER_SCENE_DETECTION=0`.
-
-## Optional hardening
+Transcripts are analysis input only; they are never rewritten or emitted:
 
 ```bash
-VIDEO_DIR="${VIDEO_DIR:-$PWD}"
-python3 -m priv_sanitizer harden "$VIDEO_DIR/artifacts/input-baseline/job" \
-  --transcript "$VIDEO_DIR/input.docx" \
-  --job "$VIDEO_DIR/artifacts/input-hardened/job"
-python3 -m priv_sanitizer render "$VIDEO_DIR/artifacts/input-hardened/job" \
-  --output "$VIDEO_DIR/artifacts/input-hardened"
+cd "$VIDEO_DIR"
+"$TOOL_DIR/priv-sanitizer" harden \
+  artifacts/meeting-baseline/job \
+  --transcript meeting.docx \
+  --job artifacts/meeting-hardened/job
+
+"$TOOL_DIR/priv-sanitizer" render \
+  artifacts/meeting-hardened/job \
+  --output artifacts/meeting-hardened
 ```
 
-The transcript is secondary evidence only. It is not rewritten or emitted. By
-default, hardening uses transcript evidence for analysis and keeps audio
-unchanged. To opt in to experimental short, review-required mute windows
-around transcript name matches, add `--experimental-audio` to the batch
-command or pass `--experimental-audio` to `harden`. It does not mute all speech
-in a cue. For an extracted clip, pass the source timestamp offset with
-`--transcript-offset`.
+For an extracted clip, subtract the clip's source start time from transcript
+timestamps with `--transcript-offset`. Batch mode performs this hardening
+analysis automatically when an unambiguous matching transcript is present and
+reuses the baseline encode when the redaction mask did not change.
 
-Batch mode still performs transcript hardening analysis, but reuses the
-baseline encoded video when hardening produces the same visual mask and audio
-remains preserved. A second encode is performed only when the transcript pass
-changes visual redactions or experimental audio muting is enabled.
+### Tune CPU use
 
-FFmpeg and FFprobe must be available on `PATH` or configured explicitly. Pillow is required. OCR uses
-`pytesseract` plus the `tesseract` executable when installed; face detection
-uses `opencv-python-headless` when installed. Both are optional, and their
-availability and detections are written to `analysis.json`.
-
-For a non-system FFmpeg installation, configure it once per shell (or add
-these exports to your shell profile):
+Rendering defaults to eight FFmpeg/filter/x264 threads:
 
 ```bash
-export PRIV_SANITIZER_FFMPEG_DIR="${PRIV_SANITIZER_FFMPEG_DIR:-$PWD/.tools/ffmpeg/bin}"
-# Alternatively set PRIV_SANITIZER_FFMPEG and PRIV_SANITIZER_FFPROBE directly.
+"$TOOL_DIR/priv-sanitizer" -j 4
 ```
 
-On Debian/Ubuntu, the usual installation is:
+Use `-j N`/`--jobs N` for a one-off override. The equivalent environment
+variables are `PRIV_SANITIZER_FFMPEG_THREADS` and
+`PRIV_SANITIZER_X264_PRESET`. More threads are not always faster for long
+blur/overlay graphs or when storage is busy.
+
+## Audio and transcripts
+
+| Mode | Transcript required | Audio behavior |
+| --- | --- | --- |
+| Video-only baseline | No | Preserved |
+| Transcript-assisted hardening | Optional | Preserved |
+| `--experimental-audio` | Yes for useful matches | Short, review-required mute windows around matched spoken names |
+
+Experimental audio processing is disabled by default. It does not anonymize a
+voice, mute every mention, or redact arbitrary spoken identifiers. Use it only
+when its generated intervals have been reviewed:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y ffmpeg
+cd "$VIDEO_DIR"
+"$TOOL_DIR/priv-sanitizer" batch \
+  --input . \
+  --output ./outputs_sanitized \
+  --artifacts ./artifacts \
+  --experimental-audio
 ```
 
-For the full local vision stack, install the Python extras with
-`pip install -e '.[vision]'` and install the system Tesseract language data
-separately. The tool still runs without those extras using its auditable local
-temporal layout detector and conservative full-frame/participant-tile fallback.
+## How detection works
 
-Review `redaction-manifest.json`, `analysis.json`, and `report.txt` before distributing any output.
+1. A coarse sampler always includes the first frame and periodic frames.
+2. A lightweight FFmpeg scene-change pass adds frames around brief layout
+   transitions.
+3. OCR, face, and temporal meeting-layout evidence are combined into
+   time-bounded blur regions.
+4. FFmpeg renders regional blur while preserving shared content where the
+   layout can be separated safely.
+5. Verification checks output duration and video/audio stream presence.
+
+If a layout cannot be separated confidently, the tool may use a conservative
+full-frame participant fallback. Detector availability, warnings, evidence,
+and review-required regions are recorded in `analysis.json` and
+`redaction-manifest.json`.
+
+## Review before sharing
+
+Always inspect the output and these artifacts:
+
+- `outputs_sanitized/<stem>.mp4` — the delivery copy.
+- `artifacts/<stem>/baseline/job/analysis.json` — detector evidence and
+  warnings.
+- `artifacts/<stem>/baseline/job/redaction-manifest.json` — applied regions,
+  modes, and timestamps.
+- `artifacts/<stem>/baseline/report.txt` — readable job summary.
+- `artifacts/batch-report.json` — per-file status and verification results.
+- `verbose.log` — stage progress, command timing, and long-run heartbeats.
+
+Duration and stream checks confirm a usable output; they do not prove that
+every visual or spoken identifier was found.
+
+## Installation options
+
+`scripts/install.sh` supports Debian/Ubuntu and can be previewed safely:
+
+```bash
+bash scripts/install.sh --dry-run
+```
+
+Useful options:
+
+- `--no-system-packages` — require FFmpeg, FFprobe, and Tesseract on `PATH`.
+- `--skip-vision` — install without the OCR/face Python extras.
+- `--docker` — install the native runtime and build Docker, then select Docker
+  for the launcher.
+- `--docker-only` — build Docker without installing host Python packages.
+- `--docker-image NAME` — choose a Docker image tag.
+- `--venv PATH` — choose the virtual-environment location.
+
+The Docker image packages Python, FFmpeg/FFprobe, Tesseract English data,
+OpenCV, Pillow, and the sanitizer runtime. Docker setup needs access to the
+package registries during installation; normal processing is local.
+
+If you already manage FFmpeg separately, set:
+
+```bash
+export PRIV_SANITIZER_FFMPEG_DIR="$PWD/.tools/ffmpeg/bin"
+```
+
+The activation script also exposes the project virtual environment and local
+tool paths:
+
+```bash
+source "$TOOL_DIR/scripts/activate.sh"
+```
+
+## Logging and troubleshooting
+
+- `verbose.log` is created by default in the recordings folder.
+- `-v`/`--verbose` forces detailed diagnostics into that log.
+- `-q`/`--quiet` suppresses status output and does not create the log for that
+  run.
+- `PRIV_SANITIZER_HEARTBEAT_SECONDS=5` makes long-render heartbeats more
+  frequent.
+- `PRIV_SANITIZER_USE_DOCKER=0` forces the native launcher; `=1` requires the
+  configured Docker image.
+- `PRIV_SANITIZER_SCENE_DETECTION=0` disables adaptive scene triggers for a
+  diagnostic comparison. Threshold and clustering are controlled by
+  `PRIV_SANITIZER_SCENE_THRESHOLD` and
+  `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
+
+Common setup errors:
+
+| Message | Resolution |
+| --- | --- |
+| `ffprobe was not found` | Run `scripts/install.sh`, install FFmpeg, or set `PRIV_SANITIZER_FFMPEG_DIR`. |
+| Docker image unavailable | Run `bash scripts/install.sh --docker-only` or set `PRIV_SANITIZER_USE_DOCKER=0`. |
+| OCR/face backend unavailable | Install the vision extras and Tesseract, or review the conservative fallback warnings. |
+
+## Supported formats and limitations
+
+Supported videos are MP4, MOV, AVI, MKV, WEBM, and M4V. Optional transcripts
+are DOCX, SRT, and VTT.
+
+Detector coverage varies with recording quality, compression, UI theme, and
+meeting layout. Shared-screen identifiers, names missed by OCR, and spoken
+identifiers outside experimental transcript matches are not guaranteed to be
+redacted. Review every output before sharing it.
