@@ -17,6 +17,46 @@ def test_no_args_defaults_to_batch_in_current_directory(tmp_path, monkeypatch):
 def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["-j", "3"]).jobs == 3
     assert build_parser().parse_args(["batch", "--jobs", "5"]).jobs == 5
+    assert build_parser().parse_args(["-k"]).keep_videos is True
+    assert build_parser().parse_args(["batch", "--keep-videos"]).keep_videos is True
+
+
+def test_batch_keeps_only_delivery_video_by_default(tmp_path):
+    def run_batch(root: Path, keep_videos: bool):
+        root.mkdir(parents=True, exist_ok=True)
+        video = root / "meeting.mp4"
+        video.touch()
+
+        def fake_baseline(source: Path, job: Path, **kwargs):
+            job.mkdir(parents=True, exist_ok=True)
+            (job / "redaction-manifest.json").write_text(
+                json.dumps({"audio_mode": "preserve", "visual_redactions": [], "audio_redactions": []}),
+                encoding="utf-8",
+            )
+
+        def fake_render(job: Path, output_dir: Path, **kwargs):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "sanitized.mp4").write_bytes(b"artifact video")
+            (output_dir / "render.json").write_text(json.dumps({"verify": {"passed": True}}), encoding="utf-8")
+            return {"verify": {"passed": True}}
+
+        with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
+            pipeline, "render_job", side_effect=fake_render
+        ):
+            report = pipeline.batch(root, root / "outputs_sanitized", keep_videos=keep_videos)
+        artifact_video = root / "artifacts" / "meeting" / "baseline" / "sanitized.mp4"
+        return report, artifact_video
+
+    discarded, discarded_video = run_batch(tmp_path / "discard", False)
+    assert discarded["keep_artifact_videos"] is False
+    assert discarded["completed_count"] == 1
+    assert (tmp_path / "discard" / "outputs_sanitized" / "meeting.mp4").exists()
+    assert not discarded_video.exists()
+
+    kept, kept_video = run_batch(tmp_path / "keep", True)
+    assert kept["keep_artifact_videos"] is True
+    assert kept["completed_count"] == 1
+    assert kept_video.exists()
 
 
 def test_discovery_and_transcript_pairing(tmp_path):

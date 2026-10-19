@@ -56,6 +56,13 @@ def _add_jobs_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_keep_videos_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-k", "--keep-videos", action="store_true", default=argparse.SUPPRESS,
+        help="keep rendered MP4s inside per-video artifacts (final outputs are always kept)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     examples = """Examples:
   # Batch every video in a folder; finals go to outputs_sanitized/.
@@ -77,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
 
   # Opt in to experimental transcript-based audio name muting.
   priv-sanitizer batch --input "$VIDEO_DIR" --experimental-audio
+
+  # Keep the per-pass artifact MP4s as well as the final delivery copies.
+  priv-sanitizer batch --input "$VIDEO_DIR" --keep-videos
 """
     parser = argparse.ArgumentParser(
         prog="priv-sanitizer",
@@ -96,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-j", "--jobs", type=_positive_jobs, default=None,
         help="number of FFmpeg/filter threads (default: 8)",
     )
+    _add_keep_videos_option(parser)
     sub = parser.add_subparsers(dest="command", required=False)
     parser.set_defaults(
         command="batch",
@@ -103,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         output=Path.cwd() / "outputs_sanitized",
         artifacts=None,
         experimental_audio=False,
+        keep_videos=False,
         every=4.0,
     )
 
@@ -116,6 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(batch_cmd)
     _add_quiet_option(batch_cmd)
     _add_jobs_option(batch_cmd)
+    _add_keep_videos_option(batch_cmd)
     batch_cmd.add_argument("--input", type=_directory, default=Path.cwd())
     batch_cmd.add_argument("--output", type=Path, default=Path.cwd() / "outputs_sanitized")
     batch_cmd.add_argument(
@@ -214,6 +227,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.output,
                     artifacts_dir=args.artifacts,
                     experimental_audio=args.experimental_audio,
+                    keep_videos=args.keep_videos,
                     every=args.every,
                 ),
                 indent=2,

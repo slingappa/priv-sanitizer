@@ -302,6 +302,31 @@ def render_job(
     return {**result, "verify": verify}
 
 
+def _mark_artifact_video_retention(output_dir: Path, retained: bool) -> None:
+    """Record whether the rendered artifact MP4 remains on disk."""
+    metadata_path = output_dir / "render.json"
+    if not metadata_path.exists():
+        return
+    try:
+        metadata = read_json(metadata_path)
+    except (OSError, ValueError, TypeError):
+        return
+    metadata["artifact_video_retained"] = retained
+    write_json(metadata_path, metadata)
+
+
+def _discard_artifact_video(output_dir: Path) -> None:
+    """Remove only the generated per-pass MP4, preserving audit metadata."""
+    video_path = output_dir / "sanitized.mp4"
+    try:
+        video_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _status(f"warning: could not remove artifact video {video_path}: {exc}")
+    _mark_artifact_video_retention(output_dir, False)
+
+
 def _redaction_signature(manifest: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """Return render-relevant redactions without detector IDs/evidence noise."""
     signature: list[tuple[Any, ...]] = []
@@ -369,6 +394,7 @@ def batch(
     *,
     artifacts_dir: Path | None = None,
     experimental_audio: bool = False,
+    keep_videos: bool = False,
     every: float = 4.0,
 ) -> dict[str, Any]:
     """Run baseline plus optional transcript hardening for every local video."""
@@ -419,6 +445,7 @@ def batch(
             entry["baseline"] = {
                 "status": "completed" if baseline_render["verify"]["passed"] else "failed",
                 "output": str((baseline_dir / "sanitized.mp4").resolve()),
+                "artifact_video_retained": keep_videos,
                 "verify": baseline_render["verify"],
             }
             final_source = baseline_dir / "sanitized.mp4"
@@ -452,6 +479,7 @@ def batch(
                     entry["hardened"] = {
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
                         "output": str((hardened_dir / "sanitized.mp4").resolve()),
+                        "artifact_video_retained": keep_videos,
                         "verify": hardened_render["verify"],
                         "reused_baseline": hardened_render.get("reused_baseline", False),
                     }
@@ -479,6 +507,13 @@ def batch(
             entry["status"] = "failed"
             entry["error"] = str(exc)
             _status(f"batch {index}/{len(videos)}: failed {video.name}: {exc}")
+        finally:
+            if not keep_videos:
+                # The flat output has already been copied when processing
+                # succeeds. Keep JSON/TXT manifests and reports, but avoid
+                # retaining another full encoded video under artifacts.
+                _discard_artifact_video(baseline_dir)
+                _discard_artifact_video(video_root / "hardened")
         results.append(entry)
 
     report = {
@@ -488,6 +523,7 @@ def batch(
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
         "experimental_audio_redaction": experimental_audio,
+        "keep_artifact_videos": keep_videos,
         "video_count": len(videos),
         "completed_count": sum(item.get("status") == "completed" for item in results),
         "failed_count": sum(item.get("status") == "failed" for item in results),

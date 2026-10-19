@@ -34,10 +34,13 @@ cd "$video_dir"
 ```
 
 Each recording gets a flat final file at
-`outputs_sanitized/<video-stem>.mp4`, detailed `artifacts/<video-stem>/baseline/`
-and optional `hardened/` artifacts, and the overall `artifacts/batch-report.json`.
-Same-stem DOCX/SRT/VTT files are paired automatically; a transcript is never
-required for baseline processing and is not rewritten or emitted.
+`outputs_sanitized/<video-stem>.mp4`, small traceability artifacts under
+`artifacts/<video-stem>/baseline/` and optional `hardened/`, and the overall
+`artifacts/batch-report.json`. Per-pass MP4s are removed from `artifacts/` by
+default to avoid filling storage; pass `-k`/`--keep-videos` when those extra
+videos are specifically needed. Same-stem DOCX/SRT/VTT files are paired
+automatically; a transcript is never required for baseline processing and is
+not rewritten or emitted.
 
 For a new machine, run `bash scripts/install.sh` and then
 `source scripts/activate.sh` first. The installer provisions the Python

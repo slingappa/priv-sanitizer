@@ -14,6 +14,7 @@ from priv_sanitizer.media import (
     detect_ocr_regions,
     sample_frames,
     _scene_change_frames,
+    _progress_status,
     _verbose,
 )
 
@@ -205,6 +206,21 @@ def test_verbose_details_are_log_only(tmp_path):
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == ""
     assert "verbose: command details" in log.read_text(encoding="utf-8")
+
+
+def test_progress_status_shows_braille_spinner(monkeypatch):
+    stderr = StringIO()
+    monkeypatch.setenv("PRIV_SANITIZER_QUIET", "0")
+    with redirect_stderr(stderr):
+        _progress_status("rendering video", 42)
+        _progress_status("rendering video", 42)
+    message = stderr.getvalue()
+    lines = [line for line in message.splitlines() if line]
+    assert len(lines) == 2
+    assert all("rendering video:" in line and "42%" in line for line in lines)
+    symbols = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert all(any(symbol in line for symbol in symbols) for line in lines)
+    assert lines[0].split(": ", 1)[1][0] != lines[1].split(": ", 1)[1][0]
 
 
 def test_layout_detection_is_temporal_not_global(tmp_path):

@@ -21,6 +21,8 @@ class ToolError(RuntimeError):
 
 _VERBOSE_LOG_INITIALIZED = False
 _VERBOSE_LOG_FAILURE_REPORTED = False
+_PROGRESS_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_PROGRESS_SPINNER_INDEX = 0
 
 
 def _tool(name: str) -> str:
@@ -101,9 +103,12 @@ def _heartbeat_seconds() -> float:
 
 
 def _progress_status(stage: str, percent: int, *, final: bool = False) -> None:
+    global _PROGRESS_SPINNER_INDEX
     if os.environ.get("PRIV_SANITIZER_QUIET") == "1":
         return
-    message = f"[priv-sanitizer] {stage}: {percent:3d}%"
+    spinner = _PROGRESS_SPINNER[_PROGRESS_SPINNER_INDEX % len(_PROGRESS_SPINNER)]
+    _PROGRESS_SPINNER_INDEX += 1
+    message = f"[priv-sanitizer] {stage}: {spinner} {percent:3d}%"
     _verbose_log(f"progress: {stage}: {percent:3d}%")
     stream = os.sys.stderr
     if stream.isatty():
@@ -143,6 +148,7 @@ def run(
             # the pipe; waiting until stdout closes would deadlock FFmpeg.
             selector.register(process.stderr, selectors.EVENT_READ, data="stderr")
         last_progress_at = started
+        last_status_at = started
         heartbeat = _heartbeat_seconds()
         while selector.get_map():
             events = selector.select(timeout=heartbeat)
@@ -150,6 +156,9 @@ def run(
                 if process.poll() is None:
                     elapsed = time.perf_counter() - started
                     quiet_for = time.perf_counter() - last_progress_at
+                    if last_percent >= 0:
+                        _progress_status(progress_stage, last_percent)
+                        last_status_at = time.perf_counter()
                     _verbose(
                         f"{progress_stage} still running after {elapsed:.0f}s "
                         f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
@@ -174,6 +183,15 @@ def run(
                     if percent != last_percent:
                         _progress_status(progress_stage, percent)
                         last_percent = percent
+                        last_status_at = time.perf_counter()
+            # Some FFmpeg filters emit diagnostics continuously while their
+            # encoded timestamp remains unchanged. Keep the spinner moving in
+            # that case too, without pretending that percentage advanced.
+            if process.poll() is None and last_percent >= 0:
+                now = time.perf_counter()
+                if now - last_status_at >= heartbeat:
+                    _progress_status(progress_stage, last_percent)
+                    last_status_at = now
         selector.close()
         stderr = "\n".join(stderr_lines)
         returncode = process.wait()

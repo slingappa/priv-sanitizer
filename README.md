@@ -66,6 +66,15 @@ cd "$VIDEO_DIR"
 It mounts the current folder as `/work`, preserves output ownership, and
 avoids requiring users to write a `docker run` command.
 
+The flat delivery video is always retained. Batch mode removes intermediate
+per-pass `sanitized.mp4` files from `artifacts/` by default, while keeping the
+small JSON/TXT traceability files. Add `-k`/`--keep-videos` when you explicitly
+need those additional artifact videos:
+
+```bash
+"$TOOL_DIR/priv-sanitizer" -k
+```
+
 ## Quick start — native Python
 
 Use the native runtime instead of Docker when you prefer a local virtual
@@ -109,6 +118,12 @@ The equivalent explicit form is:
   --output ./outputs_sanitized \
   --artifacts ./artifacts
 ```
+
+Use `-k`/`--keep-videos` with batch mode to retain baseline and optional
+hardened MP4s under `artifacts/<stem>/`; without it, only the selected flat
+delivery copy under `outputs_sanitized/` is kept.
+Explicit `sanitize` and `render` commands retain the video in the output
+directory you choose because that directory is an intentional direct output.
 
 Discovery is non-recursive. Videos may be MP4, MOV, AVI, MKV, WEBM, or M4V;
 transcripts may be DOCX, SRT, or VTT. A same-stem transcript is paired
@@ -209,6 +224,8 @@ Always inspect the output and these artifacts:
 - `artifacts/<stem>/baseline/job/redaction-manifest.json` — applied regions,
   modes, and timestamps.
 - `artifacts/<stem>/baseline/report.txt` — readable job summary.
+- `artifacts/<stem>/baseline/render.json` — render settings, verification, and
+  whether the artifact video was retained.
 - `artifacts/batch-report.json` — per-file status and verification results.
 - `verbose.log` — stage progress, command timing, and long-run heartbeats.
 
@@ -253,6 +270,8 @@ source "$TOOL_DIR/scripts/activate.sh"
 ## Logging and troubleshooting
 
 - `verbose.log` is created by default in the recordings folder.
+- Live progress shows a rotating Braille spinner beside each percentage so a
+  slow conversion visibly remains active.
 - `-v`/`--verbose` forces detailed diagnostics into that log.
 - `-q`/`--quiet` suppresses status output and does not create the log for that
   run.
@@ -264,6 +283,30 @@ source "$TOOL_DIR/scripts/activate.sh"
   diagnostic comparison. Threshold and clustering are controlled by
   `PRIV_SANITIZER_SCENE_THRESHOLD` and
   `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
+- `-k`/`--keep-videos` retains per-pass artifact MP4s; omit it to reduce
+  storage use during batch processing.
+
+A typical long-running batch prints concise stage updates like this. In an
+interactive terminal, the progress line is refreshed in place; the Braille
+character changes even when the encoded percentage is temporarily unchanged.
+
+```text
+$ priv-sanitizer -j16
+[priv-sanitizer] batch 1/1: baseline example-meeting.mp4
+[priv-sanitizer] probing input
+[priv-sanitizer] sampling frames: ⠋ 100%
+[priv-sanitizer] detecting scene changes: ⠙ 100%
+[priv-sanitizer] sampling complete: 1444 frames in 79.4s
+[priv-sanitizer] analysing layout, OCR, and faces
+[priv-sanitizer] visual analysis complete: 6 regions in 29.5s
+[priv-sanitizer] audio analysis skipped (audio preserved; enable --experimental-audio or PRIV_SANITIZER_AUDIO_ANALYSIS=1 to enable)
+[priv-sanitizer] writing analysis manifest
+[priv-sanitizer] preparing render
+[priv-sanitizer] render settings: ffmpeg_threads=16, x264_preset=ultrafast
+[priv-sanitizer] rendering video: ⠴  78%
+[priv-sanitizer] rendering video: ⠦  79%
+[priv-sanitizer] rendering video: ⠇ 100%
+```
 
 Common setup errors:
 
