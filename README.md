@@ -280,6 +280,8 @@ source "$TOOL_DIR/scripts/activate.sh"
   slow conversion visibly remains active. In a terminal it ticks about four
   times per second even when the percentage is unchanged; non-interactive logs
   use the slower heartbeat cadence.
+- The Docker launchers preserve an interactive terminal for this animation and
+  keep redirected or piped runs line-oriented.
 - `-v`/`--verbose` forces detailed diagnostics into that log.
 - `-q`/`--quiet` suppresses status output and does not create the log for that
   run.

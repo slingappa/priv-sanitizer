@@ -32,6 +32,12 @@ if [[ "$DOCKER_MODE" == "1" || ( "$DOCKER_MODE" == "auto" && -f "$DOCKER_RUNTIME
     exit 1
   }
   DOCKER_ARGS=(run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/work" --workdir /work)
+  # Preserve an interactive terminal so the container can animate progress;
+  # redirected/piped runs remain non-interactive and line-oriented.
+  if [[ -t 1 || -t 2 ]]; then
+    DOCKER_ARGS+=(--tty)
+    [[ -t 0 ]] && DOCKER_ARGS+=(--interactive)
+  fi
   for ENV_NAME in PRIV_SANITIZER_FFMPEG_THREADS PRIV_SANITIZER_X264_PRESET PRIV_SANITIZER_QUIET PRIV_SANITIZER_VERBOSE PRIV_SANITIZER_HEARTBEAT_SECONDS PRIV_SANITIZER_AUDIO_ANALYSIS; do
     if [[ -n "${!ENV_NAME:-}" ]]; then
       DOCKER_ARGS+=(--env "$ENV_NAME=${!ENV_NAME}")
