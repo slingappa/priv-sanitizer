@@ -214,13 +214,15 @@ def test_progress_status_shows_braille_spinner(monkeypatch):
     with redirect_stderr(stderr):
         _progress_status("rendering video", 42)
         _progress_status("rendering video", 42)
+        _progress_status("rendering video", 100, final=True)
     message = stderr.getvalue()
     lines = [line for line in message.splitlines() if line]
-    assert len(lines) == 2
-    assert all("rendering video:" in line and "42%" in line for line in lines)
+    assert len(lines) == 3
+    assert all("rendering video:" in line and "42%" in line for line in lines[:2])
     symbols = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    assert all(any(symbol in line for symbol in symbols) for line in lines)
+    assert all(any(symbol in line for symbol in symbols) for line in lines[:2])
     assert lines[0].split(": ", 1)[1][0] != lines[1].split(": ", 1)[1][0]
+    assert lines[2].endswith("⠿ 100%")
 
 
 def test_layout_detection_is_temporal_not_global(tmp_path):

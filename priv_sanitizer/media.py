@@ -22,6 +22,7 @@ class ToolError(RuntimeError):
 _VERBOSE_LOG_INITIALIZED = False
 _VERBOSE_LOG_FAILURE_REPORTED = False
 _PROGRESS_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_PROGRESS_COMPLETE = "⠿"  # Braille dots 1-6: a complete six-dot block.
 _PROGRESS_SPINNER_INDEX = 0
 
 
@@ -106,8 +107,11 @@ def _progress_status(stage: str, percent: int, *, final: bool = False) -> None:
     global _PROGRESS_SPINNER_INDEX
     if os.environ.get("PRIV_SANITIZER_QUIET") == "1":
         return
-    spinner = _PROGRESS_SPINNER[_PROGRESS_SPINNER_INDEX % len(_PROGRESS_SPINNER)]
-    _PROGRESS_SPINNER_INDEX += 1
+    if final:
+        spinner = _PROGRESS_COMPLETE
+    else:
+        spinner = _PROGRESS_SPINNER[_PROGRESS_SPINNER_INDEX % len(_PROGRESS_SPINNER)]
+        _PROGRESS_SPINNER_INDEX += 1
     message = f"[priv-sanitizer] {stage}: {spinner} {percent:3d}%"
     _verbose_log(f"progress: {stage}: {percent:3d}%")
     stream = os.sys.stderr

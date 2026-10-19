@@ -36,11 +36,11 @@ cd "$video_dir"
 Each recording gets a flat final file at
 `outputs_sanitized/<video-stem>.mp4`, small traceability artifacts under
 `artifacts/<video-stem>/baseline/` and optional `hardened/`, and the overall
-`artifacts/batch-report.json`. Per-pass MP4s are removed from `artifacts/` by
-default to avoid filling storage; pass `-k`/`--keep-videos` when those extra
-videos are specifically needed. Same-stem DOCX/SRT/VTT files are paired
-automatically; a transcript is never required for baseline processing and is
-not rewritten or emitted.
+`artifacts/batch-report.json`. Generated artifact MP4s are removed from
+`artifacts/` by default to avoid filling storage; pass `-k`/`--keep-videos`
+when the final-pass artifact video is specifically needed. Same-stem
+DOCX/SRT/VTT files are paired automatically; a transcript is never required
+for baseline processing and is not rewritten or emitted.
 
 For a new machine, run `bash scripts/install.sh` and then
 `source scripts/activate.sh` first. The installer provisions the Python
@@ -55,9 +55,12 @@ The workflow has two passes:
 1. Baseline: video-only input. Preserve audio by default, blur participant visuals, skip the expensive audio scan unless explicitly enabled, and report that spoken-name privacy is unresolved without timed evidence. Do not block on a missing transcript.
 2. Hardening: optionally provide the original SRT, WebVTT, or DOCX transcript. Use it as secondary evidence for names, speaker labels, and timing. Audio remains unchanged by default; `--experimental-audio` explicitly opts in to short matched-name mute windows. Do not rewrite or emit a sanitized transcript.
 
-When hardening does not change the render-relevant visual/audio redactions, the
-baseline encoded video is reused; a second encode is reserved for changed
-visual masks or experimental audio redaction.
+When a transcript is available, both analysis passes complete before rendering
+the final transcript-aware manifest, so batch performs one full-length encode.
+The baseline directory remains analysis-only in that successful path. If
+hardening fails or its render fails verification, batch renders the baseline
+manifest once as a fallback. A transcript is never used as a reason to encode
+the full recording twice.
 
 The detector stack records per-segment layout-model evidence, OCR evidence
 (Tesseract when installed), and face-detection evidence (OpenCV Haar when

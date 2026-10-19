@@ -441,14 +441,12 @@ def batch(
                 every=every,
                 analyze_audio=experimental_audio,
             )
-            baseline_render = render_job(baseline_job, baseline_dir, verify_audio=experimental_audio)
             entry["baseline"] = {
-                "status": "completed" if baseline_render["verify"]["passed"] else "failed",
-                "output": str((baseline_dir / "sanitized.mp4").resolve()),
-                "artifact_video_retained": keep_videos,
-                "verify": baseline_render["verify"],
+                "status": "completed",
+                "rendered": False,
+                "output": None,
+                "artifact_video_retained": False,
             }
-            final_source = baseline_dir / "sanitized.mp4"
 
             if transcript:
                 hardened_dir = video_root / "hardened"
@@ -462,34 +460,42 @@ def batch(
                         narrow_audio=experimental_audio,
                         transcript_offset=0.0,
                     )
-                    baseline_manifest_path = baseline_job / "redaction-manifest.json"
-                    hardened_manifest_path = hardened_job / "redaction-manifest.json"
-                    if baseline_manifest_path.exists() and hardened_manifest_path.exists() and _can_reuse_baseline_render(
-                        read_json(baseline_manifest_path), read_json(hardened_manifest_path)
-                    ):
-                        hardened_render = reuse_render_job(
-                            baseline_dir / "sanitized.mp4",
-                            hardened_job,
-                            hardened_dir,
-                            verify_audio=experimental_audio,
-                        )
-                    else:
-                        _status("hardening changed render redactions; rendering hardened output")
-                        hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
+                    # Both analysis passes complete before encoding. The
+                    # transcript-aware manifest is the final decision, so a
+                    # matching baseline MP4 is no longer rendered first and
+                    # then replaced by a second full-length encode.
+                    _status("rendering transcript-hardened output (single pass)")
+                    hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
                     entry["hardened"] = {
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
+                        "rendered": True,
                         "output": str((hardened_dir / "sanitized.mp4").resolve()),
                         "artifact_video_retained": keep_videos,
                         "verify": hardened_render["verify"],
-                        "reused_baseline": hardened_render.get("reused_baseline", False),
                     }
                     if hardened_render["verify"]["passed"]:
                         final_source = hardened_dir / "sanitized.mp4"
+                        entry["render_pass"] = "hardened"
+                        entry["baseline"]["reason"] = "baseline analysis retained; render deferred until transcript hardening"
                     else:
-                        entry["warnings"].append("hardened render failed verification; baseline output was selected")
+                        entry["warnings"].append("hardened render failed verification; rendering baseline output")
                 except Exception as exc:  # keep independent videos processing
                     entry["hardened"] = {"status": "failed", "error": str(exc)}
-                    entry["warnings"].append("transcript hardening failed; baseline output was selected")
+                    entry["warnings"].append("transcript hardening/render failed; rendering baseline output")
+
+            if final_source is None:
+                # No transcript was paired, or the transcript pass failed
+                # verification. Encode the baseline exactly once as fallback.
+                baseline_render = render_job(baseline_job, baseline_dir, verify_audio=experimental_audio)
+                entry["baseline"] = {
+                    "status": "completed" if baseline_render["verify"]["passed"] else "failed",
+                    "rendered": True,
+                    "output": str((baseline_dir / "sanitized.mp4").resolve()),
+                    "artifact_video_retained": keep_videos,
+                    "verify": baseline_render["verify"],
+                }
+                final_source = baseline_dir / "sanitized.mp4"
+                entry["render_pass"] = "baseline"
 
             if final_source is None or not final_source.exists():
                 raise RuntimeError("no rendered output was produced")

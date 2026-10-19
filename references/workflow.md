@@ -29,7 +29,10 @@ transcript triggers the optional hardening pass. The final selected video and
 small per-pass audit artifacts are stored under `artifacts/<video-stem>/`, the
 flat final video is `outputs_sanitized/<video-stem>.mp4`, and the batch summary
 is `artifacts/batch-report.json`. Intermediate per-pass MP4s are removed from
-`artifacts/` by default; pass `-k`/`--keep-videos` to retain them.
+`artifacts/` by default; pass `-k`/`--keep-videos` to retain the generated
+final-pass MP4. When a transcript is paired, baseline and hardening analysis
+finish before one final transcript-aware render; the baseline render is only a
+fallback if hardening fails.
 
 Audio is preserved by default. To opt in to experimental transcript-based name
 muting, add `--experimental-audio` to the batch command.

@@ -101,7 +101,7 @@ def test_identical_hardening_redactions_can_reuse_baseline_render():
     assert not pipeline._can_reuse_baseline_render(base, hardened)
 
 
-def test_batch_reuses_baseline_encode_when_hardening_is_analysis_only(tmp_path):
+def test_batch_renders_transcript_hardened_manifest_once(tmp_path):
     video = tmp_path / "meeting.mp4"
     transcript = tmp_path / "meeting.srt"
     video.touch()
@@ -135,21 +135,15 @@ def test_batch_reuses_baseline_encode_when_hardening_is_analysis_only(tmp_path):
         }
         (output_job / "redaction-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    def fake_reuse(baseline_output: Path, hardened_job: Path, output_dir: Path, **kwargs):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "sanitized.mp4").write_bytes(b"baseline")
-        return {"verify": {"passed": True}, "reused_baseline": True}
-
     with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
         pipeline, "render_job", side_effect=fake_render
-    ) as render, patch.object(pipeline, "harden", side_effect=fake_harden), patch.object(
-        pipeline, "reuse_render_job", side_effect=fake_reuse
-    ) as reuse:
+    ) as render, patch.object(pipeline, "harden", side_effect=fake_harden):
         report = pipeline.batch(tmp_path, tmp_path / "outputs_sanitized")
     assert report["completed_count"] == 1
     assert render.call_count == 1
-    assert reuse.call_count == 1
-    assert report["results"][0]["hardened"]["reused_baseline"] is True
+    assert report["results"][0]["baseline"]["rendered"] is False
+    assert report["results"][0]["hardened"]["rendered"] is True
+    assert report["results"][0]["render_pass"] == "hardened"
 
 
 def test_batch_runs_both_passes_and_writes_report(tmp_path):
@@ -185,5 +179,7 @@ def test_batch_runs_both_passes_and_writes_report(tmp_path):
     assert Path(by_source["good.mp4"]["final_output"]).exists()
     assert by_source["bad.mp4"]["status"] == "failed"
     assert harden.call_count == 1
-    assert render.call_count == 2
+    # The transcript-bearing recording is encoded once from its hardened
+    # manifest; the failed recording never reaches rendering.
+    assert render.call_count == 1
     assert (tmp_path / "artifacts" / "batch-report.json").exists()

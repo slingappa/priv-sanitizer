@@ -119,9 +119,11 @@ The equivalent explicit form is:
   --artifacts ./artifacts
 ```
 
-Use `-k`/`--keep-videos` with batch mode to retain baseline and optional
-hardened MP4s under `artifacts/<stem>/`; without it, only the selected flat
-delivery copy under `outputs_sanitized/` is kept.
+Use `-k`/`--keep-videos` with batch mode to retain the generated final-pass MP4
+under `artifacts/<stem>/`; without it, only the selected flat delivery copy
+under `outputs_sanitized/` is kept. When a transcript is paired, baseline and
+hardened analysis both finish before one transcript-aware encode; the baseline
+artifact contains analysis only unless it is needed as a fallback.
 Explicit `sanitize` and `render` commands retain the video in the output
 directory you choose because that directory is an intentional direct output.
 
@@ -162,7 +164,8 @@ cd "$VIDEO_DIR"
 For an extracted clip, subtract the clip's source start time from transcript
 timestamps with `--transcript-offset`. Batch mode performs this hardening
 analysis automatically when an unambiguous matching transcript is present and
-reuses the baseline encode when the redaction mask did not change.
+renders the final hardened manifest once. If hardening fails or its output
+fails verification, batch renders the baseline manifest once as a fallback.
 
 ### Tune CPU use
 
@@ -224,8 +227,11 @@ Always inspect the output and these artifacts:
 - `artifacts/<stem>/baseline/job/redaction-manifest.json` — applied regions,
   modes, and timestamps.
 - `artifacts/<stem>/baseline/report.txt` — readable job summary.
-- `artifacts/<stem>/baseline/render.json` — render settings, verification, and
-  whether the artifact video was retained.
+- `artifacts/<stem>/baseline/render.json` or
+  `artifacts/<stem>/hardened/render.json` — render settings, verification, and
+  whether the artifact video was retained. With a successful transcript pass,
+  the hardened file is the rendered one and the baseline directory remains
+  analysis-only.
 - `artifacts/batch-report.json` — per-file status and verification results.
 - `verbose.log` — stage progress, command timing, and long-run heartbeats.
 
@@ -283,12 +289,13 @@ source "$TOOL_DIR/scripts/activate.sh"
   diagnostic comparison. Threshold and clustering are controlled by
   `PRIV_SANITIZER_SCENE_THRESHOLD` and
   `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
-- `-k`/`--keep-videos` retains per-pass artifact MP4s; omit it to reduce
+- `-k`/`--keep-videos` retains the final-pass artifact MP4; omit it to reduce
   storage use during batch processing.
 
 A typical long-running batch prints concise stage updates like this. In an
 interactive terminal, the progress line is refreshed in place; the Braille
-character changes even when the encoded percentage is temporarily unchanged.
+character changes even when the encoded percentage is temporarily unchanged,
+and completed stages use the six-dot `⠿` glyph.
 
 ```text
 $ priv-sanitizer -j16
@@ -305,7 +312,7 @@ $ priv-sanitizer -j16
 [priv-sanitizer] render settings: ffmpeg_threads=16, x264_preset=ultrafast
 [priv-sanitizer] rendering video: ⠴  78%
 [priv-sanitizer] rendering video: ⠦  79%
-[priv-sanitizer] rendering video: ⠇ 100%
+[priv-sanitizer] rendering video: ⠿ 100%
 ```
 
 Common setup errors:
