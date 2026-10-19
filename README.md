@@ -277,7 +277,9 @@ source "$TOOL_DIR/scripts/activate.sh"
 
 - `verbose.log` is created by default in the recordings folder.
 - Live progress shows a rotating Braille spinner beside each percentage so a
-  slow conversion visibly remains active.
+  slow conversion visibly remains active. In a terminal it ticks about four
+  times per second even when the percentage is unchanged; non-interactive logs
+  use the slower heartbeat cadence.
 - `-v`/`--verbose` forces detailed diagnostics into that log.
 - `-q`/`--quiet` suppresses status output and does not create the log for that
   run.

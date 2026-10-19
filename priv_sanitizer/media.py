@@ -24,6 +24,7 @@ _VERBOSE_LOG_FAILURE_REPORTED = False
 _PROGRESS_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _PROGRESS_COMPLETE = "⠿"  # Braille dots 1-6: a complete six-dot block.
 _PROGRESS_SPINNER_INDEX = 0
+_PROGRESS_SPINNER_INTERVAL = 0.25
 
 
 def _tool(name: str) -> str:
@@ -154,19 +155,27 @@ def run(
         last_progress_at = started
         last_status_at = started
         heartbeat = _heartbeat_seconds()
+        # Keep the interactive spinner responsive without making
+        # non-interactive logs noisy. Heartbeat diagnostics remain on their
+        # slower configured cadence in both modes.
+        spinner_interval = min(heartbeat, _PROGRESS_SPINNER_INTERVAL) if os.sys.stderr.isatty() else heartbeat
+        last_heartbeat_log_at = started
         while selector.get_map():
-            events = selector.select(timeout=heartbeat)
+            events = selector.select(timeout=spinner_interval)
             if not events:
                 if process.poll() is None:
+                    now = time.perf_counter()
                     elapsed = time.perf_counter() - started
                     quiet_for = time.perf_counter() - last_progress_at
-                    if last_percent >= 0:
+                    if last_percent >= 0 and now - last_status_at >= spinner_interval:
                         _progress_status(progress_stage, last_percent)
-                        last_status_at = time.perf_counter()
-                    _verbose(
-                        f"{progress_stage} still running after {elapsed:.0f}s "
-                        f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
-                    )
+                        last_status_at = now
+                    if now - last_heartbeat_log_at >= heartbeat:
+                        _verbose(
+                            f"{progress_stage} still running after {elapsed:.0f}s "
+                            f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
+                        )
+                        last_heartbeat_log_at = now
                 continue
             for key, _ in events:
                 line = key.fileobj.readline()
@@ -193,7 +202,7 @@ def run(
             # that case too, without pretending that percentage advanced.
             if process.poll() is None and last_percent >= 0:
                 now = time.perf_counter()
-                if now - last_status_at >= heartbeat:
+                if now - last_status_at >= spinner_interval:
                     _progress_status(progress_stage, last_percent)
                     last_status_at = now
         selector.close()
