@@ -11,6 +11,16 @@ if [[ -f "${PRIV_SANITIZER_VENV}/bin/activate" ]]; then
   source "${PRIV_SANITIZER_VENV}/bin/activate"
 fi
 
+# Keep the checked-out implementation ahead of any older copy that may still
+# be installed in site-packages.  This matters when the console entry point is
+# reused after a source update, and makes activation deterministic from any
+# recordings directory.
+export PYTHONPATH="${PRIV_SANITIZER_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Bash caches command locations.  Clear that cache after changing PATH so a
+# previously resolved global launcher cannot shadow this environment.
+hash -r 2>/dev/null || true
+
 if [[ -z "${PRIV_SANITIZER_FFMPEG_DIR:-}" && -x "${PRIV_SANITIZER_ROOT}/.tools/ffmpeg/bin/ffmpeg" ]]; then
   export PRIV_SANITIZER_FFMPEG_DIR="${PRIV_SANITIZER_ROOT}/.tools/ffmpeg/bin"
 fi
@@ -35,3 +45,7 @@ command -v priv-sanitizer || true
 command -v ffmpeg || true
 command -v ffprobe || true
 command -v tesseract || true
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  printf '%s\n' "[priv-sanitizer] NOTE: this script ran in a child shell; use 'source ${BASH_SOURCE[0]}' to keep activation in the current shell." >&2
+fi

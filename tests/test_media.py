@@ -9,9 +9,23 @@ import sys
 from priv_sanitizer.media import (
     _blur_filter_graph,
     _sample_entries,
+    configured_blur_opacity,
+    configured_face_padding,
+    effective_privacy_settings,
+    detect_visual_regions,
+    _face_tracks,
+    _face_observation_groups,
+    _localized_face_box,
+    PHYSICAL_FACE_MIN_HEIGHT,
+    PHYSICAL_FACE_MIN_WIDTH,
+    PHYSICAL_FACE_MAX_HEIGHT,
+    PHYSICAL_FACE_MAX_WIDTH,
+    adaptive_sampling_interval,
     detect_face_regions,
     detect_layout_regions,
     detect_ocr_regions,
+    render,
+    sample_dense_face_frames,
     sample_frames,
     _scene_change_frames,
     _progress_status,
@@ -23,11 +37,206 @@ FRAME = Path(__file__)
 LAYOUT = [{"kind": "participant_panel", "box": [0.75, 0.0, 0.25, 1.0], "start": 0.0, "end": 480.0}]
 
 
+def test_adaptive_sampling_dense_for_short_clips(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    assert adaptive_sampling_interval(4.0, 11.0) == 4.0
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    assert adaptive_sampling_interval(4.0, 11.0) == 0.5
+    assert adaptive_sampling_interval(4.0, 90.0) == 1.0
+    assert adaptive_sampling_interval(4.0, 480.0) == 4.0
+    monkeypatch.setenv("PRIV_SANITIZER_ADAPTIVE_SAMPLING", "0")
+    assert adaptive_sampling_interval(4.0, 11.0) == 4.0
+
+
+def test_effective_privacy_settings_are_stable_unless_whiteboard_is_opted_in(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_RADIUS", "96")
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_OPACITY", "50%")
+    monkeypatch.setenv("PRIV_SANITIZER_FACE_PADDING", "30%")
+    assert effective_privacy_settings() == {
+        "whiteboard": False,
+        "blur_radius": 18,
+        "blur_opacity": 1.0,
+        "face_padding": None,
+    }
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    assert effective_privacy_settings() == {
+        "whiteboard": True,
+        "blur_radius": 96,
+        "blur_opacity": 0.5,
+        "face_padding": 0.3,
+    }
+
+
 def test_blur_graph_is_regional_not_black_fill():
     graph, output = _blur_filter_graph(LAYOUT)
     assert "boxblur" in graph
     assert "drawbox" not in graph
     assert output == "[vout]"
+
+
+def test_blur_graph_accepts_stronger_radius(monkeypatch):
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    graph, _ = _blur_filter_graph(LAYOUT, blur_radius=48)
+    assert "luma_radius=min(48\\,min(w\\,h)/2-1)" in graph
+
+
+def test_blur_graph_applies_configured_opacity(monkeypatch):
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    graph, _ = _blur_filter_graph(LAYOUT, blur_radius=48, blur_opacity=0.5)
+    assert "format=rgba,colorchannelmixer=aa=0.500000" in graph
+    assert "colorchannelmixer=aa=0.500000" in graph
+
+
+def test_physical_face_graph_uses_feathered_ellipse(monkeypatch):
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    graph, _ = _blur_filter_graph([{
+        "kind": "physical_face", "mode": "blur",
+        "box": [0.1, 0.2, 0.3, 0.3], "start": 0.0, "end": 1.0,
+    }], blur_radius=48, blur_opacity=1.0)
+    assert "geq=" in graph
+    assert "lte(" in graph and "gte(" in graph
+    assert "0.6" in graph
+    assert "gblur=sigma=3" in graph
+    assert "overlay=x=main_w*0.1:y=main_h*0.2" in graph
+
+
+def test_whiteboard_render_graph_is_gated_by_mode(monkeypatch):
+    visual = [{
+        "kind": "physical_face", "mode": "blur",
+        "box": [0.1, 0.2, 0.3, 0.3], "start": 0.0, "end": 1.0,
+    }]
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    stable_graph, _ = _blur_filter_graph(visual)
+    assert "geq=" not in stable_graph
+    monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+    whiteboard_graph, _ = _blur_filter_graph(visual)
+    assert "geq=" in whiteboard_graph
+
+
+def test_blur_opacity_defaults_to_fully_opaque(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_BLUR_OPACITY", raising=False)
+    assert configured_blur_opacity() == 1.0
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_OPACITY", "75%")
+    assert configured_blur_opacity() == 0.75
+
+
+def test_face_padding_is_symmetric_and_configurable(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_FACE_PADDING", raising=False)
+    assert configured_face_padding() == 0.16
+    monkeypatch.setenv("PRIV_SANITIZER_FACE_PADDING", "24%")
+    assert configured_face_padding() == 0.24
+    monkeypatch.setenv("PRIV_SANITIZER_FACE_PADDING", "0.08")
+    assert configured_face_padding() == 0.08
+
+
+def test_render_result_reports_manifest_opacity(tmp_path, monkeypatch):
+    source = tmp_path / "input.mp4"
+    source.write_bytes(b"source")
+    output = tmp_path / "rendered" / "sanitized.mp4"
+    manifest = {
+        "source": {"video": str(source)},
+        "video": {"duration": 1.0},
+        "audio_mode": "preserve",
+        "audio_redactions": [],
+        "visual_redactions": [{
+            "kind": "participant_tile", "mode": "blur",
+            "box": [0.5, 0.0, 0.5, 1.0], "start": 0.0, "end": 1.0,
+        }],
+        "privacy": {"blur_radius": 48, "blur_opacity": 0.5},
+    }
+
+    def fake_run(args, **kwargs):
+        Path(args[-1]).write_bytes(b"rendered")
+        return __import__("subprocess").CompletedProcess(args, 0, stderr="")
+
+    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+        monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+        monkeypatch.delenv("PRIV_SANITIZER_BLUR_OPACITY", raising=False)
+        result = render(source, manifest, output)
+    assert result["blur_radius"] == 48
+    assert result["blur_opacity"] == 0.5
+    assert output.read_bytes() == b"rendered"
+
+
+def test_unknown_layout_never_emits_full_frame_fallback(monkeypatch):
+    monkeypatch.setenv("PRIV_SANITIZER_AGGRESSIVE", "1")
+    regions, _, evidence = detect_visual_regions([], 12.0, 1920, 1080)
+    assert evidence["aggressive_fallback_regions"] == 0
+    assert regions == []
+
+
+def test_dark_fullscreen_presenter_path_remains_available(tmp_path):
+    from PIL import Image
+
+    frame = tmp_path / "frame-000000.jpg"
+    Image.new("RGB", (100, 100), (20, 20, 20)).save(frame)
+    (tmp_path / "frame-timestamps.json").write_text(
+        '{"frame-000000.jpg": 0.0}\n', encoding="utf-8"
+    )
+    regions, _, evidence = detect_visual_regions([frame], 2.0, 100, 100)
+    assert evidence["dark_fullscreen_regions"] == 1
+    assert any(
+        item["kind"] == "participant_fullscreen"
+        and item["box"] == [0.0, 0.0, 1.0, 1.0]
+        for item in regions
+    )
+
+
+def test_bright_unknown_scene_does_not_use_fullscreen_fallback(tmp_path):
+    from PIL import Image
+
+    frame = tmp_path / "frame-000000.jpg"
+    Image.new("RGB", (100, 100), (220, 220, 220)).save(frame)
+    (tmp_path / "frame-timestamps.json").write_text(
+        '{"frame-000000.jpg": 0.0}\n', encoding="utf-8"
+    )
+    regions, _, evidence = detect_visual_regions([frame], 2.0, 100, 100)
+    assert evidence["dark_fullscreen_regions"] == 0
+    assert not any(item["box"] == [0.0, 0.0, 1.0, 1.0] for item in regions)
+
+
+def test_large_fullscreen_face_proposal_stays_local():
+    box = _localized_face_box((0.0, 0.0, 0.8, 0.8))
+    assert box != (0.0, 0.0, 1.0, 1.0)
+    assert box[2] <= 0.85
+    assert box[3] <= 0.85
+
+
+def test_localized_face_box_preserves_frame_edge():
+    box = _localized_face_box(
+        (0.0, 0.25, 0.55, 0.20),
+        pad_x_factor=0.50,
+        pad_y_factor=0.50,
+        max_width=0.34,
+        max_height=0.38,
+    )
+    assert box[0] == 0.0
+    assert box[2] == 0.34
+
+
+def test_physical_face_safety_envelope_matches_previous_wide_mask():
+    """The feathered mask must not clip an edge-moving presenter's face."""
+    box = _localized_face_box(
+        (0.0, 0.25, 0.40, 0.40),
+        pad_x_factor=0.50,
+        pad_y_factor=0.50,
+        max_width=PHYSICAL_FACE_MAX_WIDTH,
+        max_height=PHYSICAL_FACE_MAX_HEIGHT,
+    )
+    assert box[0] == 0.0
+    assert box[2] == PHYSICAL_FACE_MAX_WIDTH
+    assert box[3] == PHYSICAL_FACE_MAX_HEIGHT
+
+    small = _localized_face_box(
+        (0.20, 0.30, 0.06, 0.08),
+        min_width=PHYSICAL_FACE_MIN_WIDTH,
+        min_height=PHYSICAL_FACE_MIN_HEIGHT,
+        max_width=PHYSICAL_FACE_MAX_WIDTH,
+        max_height=PHYSICAL_FACE_MAX_HEIGHT,
+    )
+    assert small[2] == PHYSICAL_FACE_MIN_WIDTH
+    assert small[3] == PHYSICAL_FACE_MIN_HEIGHT
 
 
 def test_ocr_backend_contract():
@@ -136,6 +345,99 @@ def test_face_backend_handles_arbitrary_grid_tile():
     assert regions[0]["box"] != [0.75, 0.0, 0.25, 1.0]
 
 
+def test_face_backend_uses_dense_frames_for_layout_independent_scan(tmp_path):
+    class FakeImage:
+        shape = (1080, 1920, 3)
+
+        def __getitem__(self, key):
+            return self
+
+    class FakeCascade:
+        def empty(self):
+            return False
+
+        def detectMultiScale(self, roi, **kwargs):
+            return [(500, 300, 90, 100)]
+
+    class FakeCV2:
+        __version__ = "test"
+        COLOR_BGR2GRAY = 0
+        data = SimpleNamespace(haarcascades="/tmp")
+
+        @staticmethod
+        def imread(path):
+            return FakeImage()
+
+        @staticmethod
+        def cvtColor(image, code):
+            return image
+
+        @staticmethod
+        def CascadeClassifier(path):
+            return FakeCascade()
+
+    dense = tmp_path / "dense"
+    dense.mkdir()
+    frame = dense / "frame-000000.jpg"
+    frame.touch()
+    (dense / "frame-timestamps.json").write_text(
+        '{"frame-000000.jpg": 7.5}\n', encoding="utf-8"
+    )
+    with patch.dict(
+        os.environ, {"PRIV_SANITIZER_WHITEBOARD": "1"}
+    ), patch.dict(sys.modules, {"cv2": FakeCV2()}):
+        regions, evidence, _ = detect_face_regions(
+            [FRAME], [], 20.0, face_frame_paths=[frame]
+        )
+    assert evidence["sampling"]["source"] == "dense-face-frames"
+    assert evidence["sampling"]["frame_count"] == 1
+    assert regions and regions[0]["kind"] == "participant_tile"
+
+
+def test_moving_physical_face_stays_one_track_and_has_no_temporal_gap():
+    common = {
+        "panel": False,
+        "detector": "profile",
+        "variant": "gray",
+        "luma": 120.0,
+        "raw_width": 0.10,
+        "raw_height": 0.12,
+        "raw_y": 0.30,
+    }
+    observations = [
+        {**common, "timestamp": 0.0, "segment_start": 0.0, "segment_end": 0.125,
+         "box": [0.10, 0.30, 0.10, 0.12]},
+        {**common, "timestamp": 0.25, "segment_start": 0.125, "segment_end": 0.375,
+         "box": [0.30, 0.30, 0.10, 0.12]},
+    ]
+    tracks = _face_tracks(observations)
+    assert len(tracks) == 1
+    groups = _face_observation_groups(tracks[0], 1.0)
+    assert len(groups) == 2
+    assert groups[0][0] == 0.0
+    assert groups[0][1] == groups[1][0]
+    assert groups[-1][1] > groups[0][1]
+
+
+def test_whiteboard_top_false_positive_does_not_join_face_track():
+    common = {
+        "panel": False,
+        "detector": "profile",
+        "variant": "gray",
+        "luma": 120.0,
+        "raw_width": 0.10,
+        "raw_height": 0.12,
+        "raw_y": 0.30,
+    }
+    observations = [
+        {**common, "timestamp": 0.0, "segment_start": 0.0, "segment_end": 0.125,
+         "box": [0.10, 0.30, 0.10, 0.12]},
+        {**common, "timestamp": 0.25, "segment_start": 0.125, "segment_end": 0.375,
+         "box": [0.25, 0.02, 0.10, 0.12]},
+    ]
+    assert len(_face_tracks(observations)) == 2
+
+
 def test_sample_entries_use_sidecar_and_preserve_source_zero(tmp_path):
     first = tmp_path / "frame-000000.jpg"
     second = tmp_path / "frame-000001.jpg"
@@ -170,6 +472,31 @@ def test_sample_frames_drops_duplicate_periodic_source_zero(tmp_path):
     assert [path.name for path in frames] == ["frame-000000.jpg", "frame-000001.jpg"]
     timestamps = __import__("json").loads((tmp_path / "frame-timestamps.json").read_text())
     assert timestamps == {"frame-000000.jpg": 0.0, "frame-000001.jpg": 4.0}
+
+
+def test_dense_face_sampling_keeps_frame_diff_timestamps(tmp_path):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        output = Path(args[-1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.parent.joinpath("frame-000001.jpg").write_bytes(b"first")
+        output.parent.joinpath("frame-000002.jpg").write_bytes(b"change")
+        return __import__("subprocess").CompletedProcess(
+            args,
+            0,
+            stderr="[showinfo] pts_time:0.000\n[showinfo] pts_time:0.250\n",
+        )
+
+    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+        frames = sample_dense_face_frames(Path("input.mp4"), tmp_path, duration=1.0)
+    assert [path.name for path in frames] == ["frame-000001.jpg", "frame-000002.jpg"]
+    timestamps = __import__("json").loads((tmp_path / "frame-timestamps.json").read_text())
+    assert timestamps == {"frame-000001.jpg": 0.0, "frame-000002.jpg": 0.25}
+    filter_arg = next(arg for arg in calls[0] if arg.startswith("fps="))
+    assert "select='eq(n,0)+gt(scene," in filter_arg
+    assert "showinfo" in filter_arg
 
 
 def test_scene_change_candidates_keep_transition_edges(tmp_path):

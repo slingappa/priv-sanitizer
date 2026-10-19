@@ -13,11 +13,23 @@ from typing import Any
 
 from .media import (
     _status,
+    _coalesce_render_regions,
+    adaptive_sampling_interval,
+    aggressive_redaction_enabled,
     audio_levels,
     detect_speech_intervals,
     detect_visual_regions,
+    detector_capabilities,
+    dense_face_sampling_enabled,
+    dense_face_sampling_fps,
+    dense_face_diff_threshold,
+    dense_face_fallback_seconds,
+    effective_privacy_settings,
+    transition_timestamps_from_samples,
+    whiteboard_mode_enabled,
     probe,
     render,
+    sample_dense_face_frames,
     sample_frames,
 )
 from .transcript import hardening_intervals, parse as parse_transcript
@@ -112,12 +124,34 @@ def baseline(
     info = probe(video)
     write_json(job / "probe.json", info)
     stage_started = time.perf_counter()
-    frames = sample_frames(video, job / "frames", every=every, duration=info["duration"])
+    sample_every = adaptive_sampling_interval(every, info["duration"])
+    frames = sample_frames(video, job / "frames", every=sample_every, duration=info["duration"])
     _status(f"sampling complete: {len(frames)} frames in {time.perf_counter() - stage_started:.1f}s")
+    dense_face_frames: list[Path] = []
+    transition_timestamps = transition_timestamps_from_samples(frames)
+    face_capability = detector_capabilities()["face"]
+    dense_faces_requested = dense_face_sampling_enabled()
+    dense_faces_enabled = (
+        dense_faces_requested
+        and bool(face_capability.get("available"))
+        and sample_dense_face_frames is not None
+    )
+    if dense_faces_enabled:
+        stage_started = time.perf_counter()
+        dense_face_frames = sample_dense_face_frames(
+            video,
+            job / "dense_faces",
+            duration=info["duration"],
+            transition_timestamps=transition_timestamps,
+        )
+        _status(f"dense face sampling complete: {len(dense_face_frames)} frames in {time.perf_counter() - stage_started:.1f}s")
+    elif dense_faces_requested and not face_capability.get("available"):
+        _status(f"dense face sampling skipped ({face_capability.get('reason') or 'face backend unavailable'})")
     stage_started = time.perf_counter()
     _status("analysing layout, OCR, and faces")
     visual, visual_warnings, detector_evidence = detect_visual_regions(
-        frames, info["duration"], info["width"], info["height"]
+        frames, info["duration"], info["width"], info["height"],
+        face_frame_paths=dense_face_frames or None,
     )
     _status(f"visual analysis complete: {len(visual)} regions in {time.perf_counter() - stage_started:.1f}s")
     if analyze_audio is None:
@@ -142,14 +176,22 @@ def baseline(
         )
     if info["has_audio"]:
         audio_warnings.append("audio is preserved in the baseline; spoken participant-name privacy remains unresolved")
+    privacy_settings = effective_privacy_settings()
     manifest = {
         "schema_version": 1,
         "created_at": now(),
         "source": {"video": str(video), "video_name": video.name},
-        "policy": "conservative",
+        "policy": (
+            "experimental-whiteboard-localized-participant-regions"
+            if privacy_settings["whiteboard"] else "conservative"
+        ),
         "pass": "baseline",
         "analysis_sources": ["video", "layout", "ocr", "face"] + (["vad-evidence"] if analyze_audio else []),
         "audio_mode": audio_mode,
+        "privacy": {
+            **privacy_settings,
+            "aggressive_redaction": aggressive_redaction_enabled(),
+        },
         "video": {k: info[k] for k in ("width", "height", "duration", "fps")},
         "protected_regions": [],
         "visual_redactions": visual,
@@ -160,6 +202,26 @@ def baseline(
         "pass": "baseline",
         "video": info,
         "frame_samples": len(frames),
+        "requested_sampling_interval": round(float(every), 3),
+        "sampling_interval": round(sample_every, 3),
+        "privacy": {
+            **privacy_settings,
+            "aggressive_redaction": aggressive_redaction_enabled(),
+        },
+        "dense_face_sampling": {
+            "enabled": dense_faces_enabled,
+            "requested": dense_faces_requested,
+            "fps": dense_face_sampling_fps() if dense_faces_enabled else None,
+            "diff_threshold": dense_face_diff_threshold() if dense_faces_enabled else None,
+            "fallback_seconds": dense_face_fallback_seconds() if dense_faces_enabled else None,
+            "frame_count": len(dense_face_frames),
+            "transition_count": len(transition_timestamps),
+            "sampling_plan": read_json(job / "dense_faces" / "sampling.json")
+            if (job / "dense_faces" / "sampling.json").exists() else None,
+            "reason": None if dense_faces_enabled else (
+                face_capability.get("reason") if dense_faces_requested else "disabled by configuration"
+            ),
+        },
         "visual_detections": visual,
         "audio_detections": audio,
         "speech_activity": speech_activity,
@@ -209,7 +271,13 @@ def harden(
     manifest["analysis_sources"] = list(dict.fromkeys([*manifest.get("analysis_sources", []), "transcript"]))
     manifest["source"]["transcript"] = str(transcript.resolve())
     if transcript_visual:
-        manifest["visual_redactions"] = transcript_visual
+        # Transcript OCR is secondary evidence.  Merge it with the baseline
+        # detector output instead of replacing the baseline, otherwise a
+        # transcript pass that sees only a subset of sampled frames could
+        # discard face/rail protections already found in pass one.
+        manifest["visual_redactions"] = _coalesce_render_regions(
+            [*manifest.get("visual_redactions", []), *transcript_visual]
+        )
     manifest["transcript_analysis"] = {
         "format": transcript_data["format"],
         "cue_count": len(transcript_data["cues"]),
@@ -246,8 +314,10 @@ def harden(
     if transcript_visual_warnings:
         hardened_analysis["warnings"].extend(transcript_visual_warnings)
     if transcript_detectors:
-        hardened_analysis["detectors"] = transcript_detectors
-        hardened_analysis["visual_detections"] = transcript_visual
+        # Keep baseline detector evidence (including the dense face scan) and
+        # record the transcript-guided recheck separately for auditability.
+        hardened_analysis["transcript_detectors"] = transcript_detectors
+        hardened_analysis["visual_detections"] = manifest.get("visual_redactions", [])
     output_job.mkdir(parents=True, exist_ok=True)
     write_json(output_job / "probe.json", info)
     write_json(output_job / "analysis.json", hardened_analysis)
@@ -365,6 +435,7 @@ def reuse_render_job(
         "visual_filters": len(manifest.get("visual_redactions", [])),
         "audio_filters": len(manifest.get("audio_redactions", [])),
         "audio_mode": manifest.get("audio_mode"),
+        "face_padding": manifest.get("privacy", {}).get("face_padding"),
         "render_seconds": 0.0,
         "reused_baseline": True,
         "verify": verify,
@@ -522,6 +593,7 @@ def batch(
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
         "experimental_audio_redaction": experimental_audio,
+        "experimental_whiteboard": whiteboard_mode_enabled(),
         "keep_artifacts": keep_artifacts,
         # Deprecated report key retained for consumers of older reports.
         "keep_artifact_videos": keep_artifacts,

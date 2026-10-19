@@ -16,8 +16,9 @@ by default.
 - Works with a video alone; a transcript is optional secondary evidence.
 - Detects changing meeting layouts, including participant rails, grids, and
   full-screen speakers or avatars.
-- Uses OCR and face detection when available, with conservative layout
-  fallbacks when they are not.
+- Uses the stable meeting detector by default. Established dark/UI full-screen
+  presenter views keep their full-frame protection. The newer physical-camera
+  and whiteboard detector is experimental and is enabled only with `-w`.
 - Blurs participant images and visible names instead of replacing them with a
   solid fill.
 - Preserves audio by default. Experimental transcript-guided name muting is
@@ -25,89 +26,88 @@ by default.
 - Produces a simple delivery copy, with optional inspectable analysis and
   render artifacts when `-k`/`--keep-artifacts` is requested.
 
-## Quick start — Docker (recommended)
+## Quick start — native runtime
 
-Run these commands from the folder that contains the recordings. Set
-`VIDEO_DIR` first if the recordings are somewhere else.
+The native Python runtime is the default. Run this once, beginning in the
+folder that contains the recordings. Set `VIDEO_DIR` first if they live
+elsewhere.
 
 ```bash
 export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
 export TOOL_DIR="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
 
+mkdir -p "$(dirname "$TOOL_DIR")"
 git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
 cd "$TOOL_DIR"
-bash scripts/install.sh --docker-only
+bash scripts/install.sh
 
 cd "$VIDEO_DIR"
 "$TOOL_DIR/priv-sanitizer"
 ```
 
-The no-argument launcher batches every supported video in the current folder.
-It automatically uses the configured Docker image after `--docker-only`:
+With no arguments, the launcher batch-sanitizes supported videos directly in
+the current folder. Its delivery contract is deliberately simple:
 
 ```text
 recordings/
 ├── meeting.mp4
 ├── meeting.docx                 # optional matching transcript
 ├── outputs_sanitized/
-│   └── meeting.mp4              # delivery copy
+│   └── meeting.mp4              # final delivery copy
 └── verbose.log                  # operational diagnostics
 ```
 
-Batch mode removes generated `artifacts/` contents by default after the
-delivery copy is verified. Add `-k`/`--keep-artifacts` when you need the
-analysis manifests, reports, and rendered audit copies for debugging:
-
-```text
-artifacts/
-├── meeting/
-└── batch-report.json
-```
-
-The Docker wrapper is also available directly:
+Batch mode removes generated audit artifacts after it verifies the delivery
+copy. Retain them for a privacy review or diagnosis:
 
 ```bash
 cd "$VIDEO_DIR"
-"$TOOL_DIR/priv-sanitizer-docker"
+"$TOOL_DIR/priv-sanitizer" -k
 ```
 
-It mounts the current folder as `/work`, preserves output ownership, and
-avoids requiring users to write a `docker run` command.
+With `-k`/`--keep-artifacts`, audit files are retained under
+`artifacts/<video-stem>/` and `artifacts/batch-report.json`. The flat delivery
+file in `outputs_sanitized/` is always retained. `--keep-videos` is a
+compatibility alias for `--keep-artifacts`.
 
-The flat delivery video is always retained. Batch mode removes all generated
-artifacts by default. Add `-k`/`--keep-artifacts` when you explicitly need
-those files for debugging; `--keep-videos` remains a compatibility alias:
+## Quick start — Docker (optional)
 
-```bash
-"$TOOL_DIR/priv-sanitizer" --keep-artifacts
-```
-
-## Quick start — native Python
-
-Use the native runtime instead of Docker when you prefer a local virtual
-environment:
+Docker is an alternative, isolated runtime; it does not replace the native
+default. Docker Engine or Docker Desktop must already be installed and running.
 
 ```bash
 export VIDEO_DIR="${VIDEO_DIR:-$PWD}"
 export TOOL_DIR="${PRIV_SANITIZER_ROOT:-$HOME/tools/priv-sanitizer}"
 
+mkdir -p "$(dirname "$TOOL_DIR")"
 git clone https://github.com/slingappa/priv-sanitizer.git "$TOOL_DIR"
 cd "$TOOL_DIR"
-bash scripts/install.sh
-source scripts/activate.sh
+bash scripts/install.sh --docker-only
 
 cd "$VIDEO_DIR"
-PRIV_SANITIZER_USE_DOCKER=0 "$TOOL_DIR/priv-sanitizer"
+"$TOOL_DIR/priv-sanitizer-docker"
 ```
 
-After either installation, inspect copy-paste examples with:
+The Docker launcher mounts the current recordings folder, preserves output
+ownership, and has the same no-argument batch contract. It avoids making users
+write a raw `docker run` command. When both runtimes are available,
+`priv-sanitizer` stays native by default; use `priv-sanitizer-docker` or set
+`PRIV_SANITIZER_USE_DOCKER=1` to select Docker explicitly.
+
+The installer creates persistent `priv-sanitizer` and
+`priv-sanitizer-docker` launchers in `~/.local/bin`. Start a new login terminal
+or source `~/.profile.local` once to use those short command names. The
+repository-local launchers shown above work immediately without changing
+`PATH`.
+
+For all available commands and copy-paste examples:
 
 ```bash
 "$TOOL_DIR/priv-sanitizer" --help
 "$TOOL_DIR/priv-sanitizer" batch --help
 ```
 
-## Everyday use
+## Common workflows
 
 ### Batch a folder
 
@@ -117,7 +117,7 @@ From the recordings folder, the shortest command is:
 "$TOOL_DIR/priv-sanitizer"
 ```
 
-The equivalent explicit form is:
+The equivalent explicit form is useful in scripts or when choosing locations:
 
 ```bash
 "$TOOL_DIR/priv-sanitizer" batch \
@@ -126,19 +126,16 @@ The equivalent explicit form is:
   --artifacts ./artifacts
 ```
 
-Use `-k`/`--keep-artifacts` with batch mode to retain generated audit artifacts
-under `artifacts/<stem>/`; `--keep-videos` is a compatibility alias. Without
-`-k`, only the selected flat delivery copy under `outputs_sanitized/` remains.
-When a transcript is paired, baseline and hardened analysis both finish before
-one transcript-aware encode; the baseline artifact contains analysis only
-unless it is needed as a fallback.
-Explicit `sanitize` and `render` commands retain the video in the output
-directory you choose because that directory is an intentional direct output.
+Discovery is non-recursive. Video inputs may be MP4, MOV, AVI, MKV, WEBM, or
+M4V; transcripts may be DOCX, SRT, or VTT. A same-stem transcript is paired
+automatically. With exactly one video and one transcript, that pair is also
+unambiguous. Missing or ambiguous transcripts never block video-only
+sanitization.
 
-Discovery is non-recursive. Videos may be MP4, MOV, AVI, MKV, WEBM, or M4V;
-transcripts may be DOCX, SRT, or VTT. A same-stem transcript is paired
-automatically. Missing or ambiguous transcripts never block the video-only
-pass.
+When a transcript is paired, baseline and hardening analysis finish before one
+transcript-aware render. If that render fails verification, batch mode falls
+back to a baseline render. Direct `sanitize` and `render` commands retain the
+output directory you explicitly choose.
 
 ### Sanitize one video
 
@@ -146,49 +143,56 @@ pass.
 cd "$VIDEO_DIR"
 "$TOOL_DIR/priv-sanitizer" sanitize \
   --video meeting.mp4 \
-  --output artifacts/meeting-baseline
+  --output ./review/meeting
 ```
 
-This creates `artifacts/meeting-baseline/sanitized.mp4` and its job manifest.
-The command works with either launcher when paths are relative to the current
-recordings folder.
+This creates `review/meeting/sanitized.mp4` and the job manifest in
+`review/meeting/job/`.
 
-### Use a transcript for hardening
+### Use a transcript as secondary evidence
 
-Transcripts are analysis input only; they are never rewritten or emitted:
+Transcripts are analysis input only; they are never rewritten or emitted. Batch
+mode uses an unambiguous paired transcript automatically. To run the two passes
+explicitly:
 
 ```bash
 cd "$VIDEO_DIR"
 "$TOOL_DIR/priv-sanitizer" harden \
-  artifacts/meeting-baseline/job \
+  ./review/meeting/job \
   --transcript meeting.docx \
-  --job artifacts/meeting-hardened/job
+  --job ./review/meeting-hardened/job
 
 "$TOOL_DIR/priv-sanitizer" render \
-  artifacts/meeting-hardened/job \
-  --output artifacts/meeting-hardened
+  ./review/meeting-hardened/job \
+  --output ./review/meeting-hardened
 ```
 
-For an extracted clip, subtract the clip's source start time from transcript
-timestamps with `--transcript-offset`. Batch mode performs this hardening
-analysis automatically when an unambiguous matching transcript is present and
-renders the final hardened manifest once. If hardening fails or its output
-fails verification, batch renders the baseline manifest once as a fallback.
+For an extracted clip, pass `--transcript-offset` equal to the clip start time
+in its source recording. This aligns source-relative transcript timestamps with
+the clip.
 
-### Tune CPU use
+### Experimental physical-camera and whiteboard support
 
-Rendering defaults to eight FFmpeg/filter/x264 threads:
+The established meeting-layout detector is the normal path. Physical-camera
+and whiteboard support is experimental and is enabled only with `-w` or
+`--whiteboard`:
 
 ```bash
-"$TOOL_DIR/priv-sanitizer" -j 4
+cd "$VIDEO_DIR"
+"$TOOL_DIR/priv-sanitizer" -w -j 8 -k --blur-radius 96 --face-padding 20%
 ```
 
-Use `-j N`/`--jobs N` for a one-off override. The equivalent environment
-variables are `PRIV_SANITIZER_FFMPEG_THREADS` and
-`PRIV_SANITIZER_X264_PRESET`. More threads are not always faster for long
-blur/overlay graphs or when storage is busy.
+This opt-in adds localized face detection and masking for recordings where
+participants appear in a physical camera view or next to a whiteboard. It is
+independent of audio redaction and needs careful manual review.
 
-## Audio and transcripts
+`--blur-radius` accepts `1`–`128` (default `64` in `-w` mode); higher values
+are stronger and slower. `--blur-opacity` accepts `0`–`1` or `0%`–`100%`
+(default fully opaque), and `--face-padding` accepts `0`–`0.5` or
+`0%`–`50%` (default `16%`). Lower blur opacity intentionally reveals more
+source detail and is unsuitable for privacy delivery.
+
+## Audio and transcript behavior
 
 | Mode | Transcript required | Audio behavior |
 | --- | --- | --- |
@@ -197,8 +201,8 @@ blur/overlay graphs or when storage is busy.
 | `--experimental-audio` | Yes for useful matches | Short, review-required mute windows around matched spoken names |
 
 Experimental audio processing is disabled by default. It does not anonymize a
-voice, mute every mention, or redact arbitrary spoken identifiers. Use it only
-when its generated intervals have been reviewed:
+voice, mute every mention, or redact arbitrary spoken identifiers. Enable it
+only when its generated intervals will be reviewed:
 
 ```bash
 cd "$VIDEO_DIR"
@@ -206,7 +210,8 @@ cd "$VIDEO_DIR"
   --input . \
   --output ./outputs_sanitized \
   --artifacts ./artifacts \
-  --experimental-audio
+  --experimental-audio \
+  -k
 ```
 
 ## How detection works
@@ -214,15 +219,19 @@ cd "$VIDEO_DIR"
 1. A coarse sampler always includes the first frame and periodic frames.
 2. A lightweight FFmpeg scene-change pass adds frames around brief layout
    transitions.
-3. OCR, face, and temporal meeting-layout evidence are combined into
+3. Available OCR, face, and temporal meeting-layout evidence is combined into
    time-bounded blur regions.
-4. FFmpeg renders regional blur while preserving shared content where the
+4. With `-w`, an additional frame-difference face scan, multi-cascade tracking,
+   and localized feathered masks handle physical-camera/whiteboard scenes.
+5. FFmpeg renders regional blur while preserving shared content where the
    layout can be separated safely.
-5. Verification checks output duration and video/audio stream presence.
+6. Verification checks output duration and video/audio stream presence.
 
-If a layout cannot be separated confidently, the tool may use a conservative
-full-frame participant fallback. Detector availability, warnings, evidence,
-and review-required regions are recorded in `analysis.json` and
+If a layout cannot be separated confidently, the tool records unresolved
+coverage for manual review. The established meeting path retains its
+full-screen presenter protection; only `-w` enables the experimental localized
+whiteboard/camera path. Detector availability, warnings, evidence, effective
+mode, and review-required regions are recorded in `analysis.json` and
 `redaction-manifest.json`.
 
 ## Review before sharing
@@ -234,7 +243,7 @@ Always inspect the output. If you used `-k`, also inspect these audit artifacts:
   warnings.
 - `artifacts/<stem>/baseline/job/redaction-manifest.json` — applied regions,
   modes, and timestamps.
-- `artifacts/<stem>/baseline/report.txt` — readable job summary.
+- `artifacts/<stem>/baseline/job/report.txt` — readable job summary.
 - `artifacts/<stem>/baseline/render.json` or
   `artifacts/<stem>/hardened/render.json` — render settings, verification, and
   whether the artifact video was retained. With a successful transcript pass,
@@ -258,11 +267,14 @@ Useful options:
 
 - `--no-system-packages` — require FFmpeg, FFprobe, and Tesseract on `PATH`.
 - `--skip-vision` — install without the OCR/face Python extras.
-- `--docker` — install the native runtime and build Docker, then select Docker
-  for the launcher.
-- `--docker-only` — build Docker without installing host Python packages.
+- `--docker` — install the native runtime and build the optional Docker image;
+  native Python remains the default launcher.
+- `--docker-only` — build Docker without installing host Python packages; use
+  `priv-sanitizer-docker` (or `PRIV_SANITIZER_USE_DOCKER=1`) to run it.
 - `--docker-image NAME` — choose a Docker image tag.
 - `--venv PATH` — choose the virtual-environment location.
+- `--bin-dir PATH` — choose where persistent user launchers are installed
+  (default: `~/.local/bin`).
 
 The Docker image packages Python, FFmpeg/FFprobe, Tesseract English data,
 OpenCV, Pillow, and the sanitizer runtime. Docker setup needs access to the
@@ -274,12 +286,18 @@ If you already manage FFmpeg separately, set:
 export PRIV_SANITIZER_FFMPEG_DIR="$PWD/.tools/ffmpeg/bin"
 ```
 
-The activation script also exposes the project virtual environment and local
-tool paths:
+The activation script is optional. It exposes the project virtual environment
+and local tool paths for debugging or direct Python use:
 
 ```bash
 source "$TOOL_DIR/scripts/activate.sh"
 ```
+
+Use `source` (or `. `) rather than executing `./scripts/activate.sh`; an
+executed script runs in a child shell and cannot change the calling terminal's
+`PATH`. After a Docker-only install, use `priv-sanitizer-docker` for the
+container. Rebuild the image when the checkout gains new CLI options; the
+regular launcher continues to use native Python by default.
 
 ## Logging and troubleshooting
 
@@ -295,12 +313,19 @@ source "$TOOL_DIR/scripts/activate.sh"
   run.
 - `PRIV_SANITIZER_HEARTBEAT_SECONDS=5` makes long-render heartbeats more
   frequent.
-- `PRIV_SANITIZER_USE_DOCKER=0` forces the native launcher; `=1` requires the
-  configured Docker image.
+- The regular launcher uses native Python by default. Set
+  `PRIV_SANITIZER_USE_DOCKER=1` to require the configured Docker image, or call
+  `priv-sanitizer-docker` directly.
 - `PRIV_SANITIZER_SCENE_DETECTION=0` disables adaptive scene triggers for a
   diagnostic comparison. Threshold and clustering are controlled by
   `PRIV_SANITIZER_SCENE_THRESHOLD` and
   `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
+- `-w` enables the experimental low-resolution face scan at up to 4 fps,
+  frame-difference triggers, multi-cascade tracking, denser short-clip layout
+  sampling, and localized physical-face masks. These are intentionally off in
+  the stable default path. `PRIV_SANITIZER_DENSE_FACE_FPS`,
+  `PRIV_SANITIZER_FACE_DIFF_THRESHOLD`, and
+  `PRIV_SANITIZER_FACE_FALLBACK_SECONDS` tune that experimental mode only.
 - `-k`/`--keep-artifacts` retains generated audit artifacts for debugging;
   `--keep-videos` is a compatibility alias. Omit it to remove artifacts after
   delivery verification and minimize storage use.
@@ -333,8 +358,8 @@ Common setup errors:
 | Message | Resolution |
 | --- | --- |
 | `ffprobe was not found` | Run `scripts/install.sh`, install FFmpeg, or set `PRIV_SANITIZER_FFMPEG_DIR`. |
-| Docker image unavailable | Run `bash scripts/install.sh --docker-only` or set `PRIV_SANITIZER_USE_DOCKER=0`. |
-| OCR/face backend unavailable | Install the vision extras and Tesseract, or review the conservative fallback warnings. |
+| Docker image unavailable | Run `bash scripts/install.sh --docker-only` before using Docker, or use the native-default `priv-sanitizer` launcher. |
+| OCR/face backend unavailable | Install the vision extras and Tesseract, or review the localized-detection warnings before sharing. |
 
 ## Supported formats and limitations
 

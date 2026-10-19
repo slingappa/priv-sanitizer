@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 
 from priv_sanitizer import pipeline
-from priv_sanitizer.cli import build_parser
+from priv_sanitizer.cli import _blur_opacity, build_parser
 
 
 def test_no_args_defaults_to_batch_in_current_directory(tmp_path, monkeypatch):
@@ -20,6 +20,26 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["-k"]).keep_artifacts is True
     assert build_parser().parse_args(["batch", "--keep-artifacts"]).keep_artifacts is True
     assert build_parser().parse_args(["batch", "--keep-videos"]).keep_artifacts is True
+    assert build_parser().parse_args(["--blur-radius", "48"]).blur_radius == 48
+    assert build_parser().parse_args(["--blur-opacity", "0.75"]).blur_opacity == 0.75
+    assert build_parser().parse_args(["batch", "--blur-opacity", "75%"]).blur_opacity == 0.75
+    assert build_parser().parse_args(["--face-padding", "20%"]).face_padding == 0.20
+    assert build_parser().parse_args(["batch", "--face-padding", "0.12"]).face_padding == 0.12
+    assert build_parser().parse_args(["--aggressive"]).aggressive is True
+    assert build_parser().parse_args(["batch", "--balanced"]).aggressive is False
+    assert build_parser().parse_args(["-w"]).whiteboard is True
+    assert build_parser().parse_args(["batch", "-w"]).whiteboard is True
+    assert build_parser().parse_args([]).whiteboard is False
+
+
+def test_blur_opacity_rejects_values_outside_range():
+    for value in ("-0.1", "1.1", "101%", "not-a-number"):
+        try:
+            _blur_opacity(value)
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid opacity {value!r}")
 
 
 def test_batch_discards_artifacts_unless_retained(tmp_path):

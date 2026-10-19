@@ -13,6 +13,7 @@ SKIP_VISION=0
 SETUP_DOCKER=0
 DOCKER_ONLY=0
 DOCKER_IMAGE="${PRIV_SANITIZER_DOCKER_IMAGE:-priv-sanitizer:local}"
+USER_BIN_DIR="${PRIV_SANITIZER_BIN_DIR:-${HOME:-}/.local/bin}"
 
 usage() {
   cat <<'EOF'
@@ -22,10 +23,11 @@ Options:
   --dry-run              Print actions without changing the system.
   --no-system-packages  Do not use apt or local system-tool extraction; require tools on PATH.
   --skip-vision         Install the CLI/Pillow stack without OCR/face extras.
-  --docker              Build the optional Docker runtime and make the launcher use it.
-  --docker-only         Build Docker runtime without installing host Python packages.
+  --docker              Build the optional Docker runtime (native remains the default launcher).
+  --docker-only         Build Docker runtime without installing host Python packages; use priv-sanitizer-docker.
   --docker-image NAME   Docker image tag (default: priv-sanitizer:local).
   --venv PATH           Use PATH instead of .venv.
+  --bin-dir PATH        Install persistent launchers in PATH (default: ~/.local/bin).
   -h, --help            Show this help.
 EOF
 }
@@ -133,6 +135,62 @@ install_system_packages() {
   run $apt_cmd install -y "${packages[@]}"
 }
 
+install_user_launchers() {
+  [[ -n "$USER_BIN_DIR" && "$USER_BIN_DIR" != "/" ]] || die "a safe launcher directory is required; set PRIV_SANITIZER_BIN_DIR"
+  if (( DRY_RUN )); then
+    say "Would install persistent launchers in $USER_BIN_DIR"
+    return 0
+  fi
+
+  mkdir -p "$USER_BIN_DIR"
+  local native_target docker_target native_quoted docker_quoted
+  native_target="$ROOT_DIR/priv-sanitizer"
+  docker_target="$ROOT_DIR/priv-sanitizer-docker"
+  printf -v native_quoted '%q' "$native_target"
+  printf -v docker_quoted '%q' "$docker_target"
+
+  # These small shims make the command independent of the caller's current
+  # directory and of whether a virtualenv was activated in the parent shell.
+  # The repository launcher selects .venv, Tesseract, and Docker as needed.
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
+    printf 'exec %s "$@"\n' "$native_quoted"
+  } > "$USER_BIN_DIR/priv-sanitizer"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
+    printf 'exec %s "$@"\n' "$docker_quoted"
+  } > "$USER_BIN_DIR/priv-sanitizer-docker"
+  chmod 0755 "$USER_BIN_DIR/priv-sanitizer" "$USER_BIN_DIR/priv-sanitizer-docker"
+
+  local profile_file="${PRIV_SANITIZER_PROFILE_FILE:-${HOME:-}/.profile.local}"
+  if [[ -z "${HOME:-}" && -z "${PRIV_SANITIZER_PROFILE_FILE:-}" ]]; then
+    say "HOME is unset; launchers were installed but PATH was not persisted"
+  elif [[ "$profile_file" == "/" ]]; then
+    die "a safe profile file is required; set PRIV_SANITIZER_PROFILE_FILE"
+  elif ! grep -Fq '# >>> priv-sanitizer user launcher path >>>' "$profile_file" 2>/dev/null; then
+    local profile_dir_quoted
+    mkdir -p "$(dirname "$profile_file")"
+    profile_dir_quoted=${USER_BIN_DIR//\'/\'\\\'\'}
+    {
+      printf '\n%s\n' '# >>> priv-sanitizer user launcher path >>>'
+      printf "PRIV_SANITIZER_BIN_DIR='%s'\n" "$profile_dir_quoted"
+      printf '%s\n' 'case ":${PATH:-}:" in'
+      printf '%s\n' '  *":${PRIV_SANITIZER_BIN_DIR}:"*) ;;'
+      printf '%s\n' '  *) PATH="${PRIV_SANITIZER_BIN_DIR}${PATH:+:$PATH}" ;;'
+      printf '%s\n' 'esac'
+      printf '%s\n' 'export PATH'
+      printf '%s\n' '# <<< priv-sanitizer user launcher path <<<'
+    } >> "$profile_file"
+    say "Persisted $USER_BIN_DIR in $profile_file for future terminals"
+  fi
+
+  say "Installed persistent launchers in $USER_BIN_DIR"
+  case ":${PATH:-}:" in
+    *":$USER_BIN_DIR:"*) ;;
+    *) say "Add $USER_BIN_DIR to PATH once if it is not already present." ;;
+  esac
+}
+
 while (($#)); do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
@@ -146,6 +204,9 @@ while (($#)); do
     --venv)
       (($# >= 2)) || die "--venv requires a path"
       VENV_DIR="$2"; shift 2 ;;
+    --bin-dir)
+      (($# >= 2)) || die "--bin-dir requires a path"
+      USER_BIN_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -165,7 +226,8 @@ if (( DOCKER_ONLY )); then
   say "Building Docker image: $DOCKER_IMAGE"
   docker build -t "$DOCKER_IMAGE" "$ROOT_DIR"
   printf '%s\n' "$DOCKER_IMAGE" > "$ROOT_DIR/.docker-runtime"
-  say "Docker runtime enabled for the repository launcher."
+  install_user_launchers
+  say "Docker runtime built. Use priv-sanitizer-docker (or PRIV_SANITIZER_USE_DOCKER=1) to select it."
   exit 0
 fi
 
@@ -214,10 +276,12 @@ if (( SETUP_DOCKER )); then
     say "Building Docker image: $DOCKER_IMAGE"
     docker build -t "$DOCKER_IMAGE" "$ROOT_DIR"
     printf '%s\n' "$DOCKER_IMAGE" > "$ROOT_DIR/.docker-runtime"
-    say "Docker runtime enabled for the repository launcher."
+    say "Docker runtime built. Native Python remains the default; use priv-sanitizer-docker to select Docker."
   fi
 fi
 
+install_user_launchers
+
 say "Installation complete. Run:"
-say "  source $ROOT_DIR/scripts/activate.sh"
-say "  priv-sanitizer --help"
+say "  priv-sanitizer --help   # works from any directory; no activation required"
+say "  $ROOT_DIR/priv-sanitizer --help   # equivalent direct launcher"

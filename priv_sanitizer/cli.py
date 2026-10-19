@@ -64,6 +64,92 @@ def _add_keep_artifacts_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_whiteboard_option(parser: argparse.ArgumentParser, *, global_parser: bool = False) -> None:
+    parser.add_argument(
+        "-w", "--whiteboard", dest="whiteboard", action="store_true",
+        default=False if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL: enable physical-camera/whiteboard face detection and masking",
+    )
+
+
+def _blur_radius(value: str) -> int:
+    try:
+        radius = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("blur radius must be an integer from 1 to 128") from exc
+    if not 1 <= radius <= 128:
+        raise argparse.ArgumentTypeError("blur radius must be an integer from 1 to 128")
+    return radius
+
+
+def _blur_opacity(value: str) -> float:
+    """Parse the fraction of the blurred layer placed over the source.
+
+    Both a fraction (``0.75``) and a percentage (``75%``) are accepted so
+    the setting is convenient in shell scripts and easy to read interactively.
+    """
+    text = value.strip()
+    try:
+        if text.endswith("%"):
+            opacity = float(text[:-1]) / 100.0
+        else:
+            opacity = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "blur opacity must be a number from 0 to 1 (or 0% to 100%)"
+        ) from exc
+    if not 0.0 <= opacity <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "blur opacity must be a number from 0 to 1 (or 0% to 100%)"
+        )
+    return opacity
+
+
+def _face_padding(value: str) -> float:
+    """Parse symmetric physical-face expansion as a fraction or percentage."""
+    text = value.strip()
+    try:
+        padding = float(text[:-1]) / 100.0 if text.endswith("%") else float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "face padding must be a number from 0 to 0.5 (or 0% to 50%)"
+        ) from exc
+    if not 0.0 <= padding <= 0.5:
+        raise argparse.ArgumentTypeError(
+            "face padding must be a number from 0 to 0.5 (or 0% to 50%)"
+        )
+    return padding
+
+
+def _add_privacy_options(parser: argparse.ArgumentParser, *, global_parser: bool = False) -> None:
+    parser.add_argument(
+        "--blur-radius", type=_blur_radius,
+        default=None if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL -w: FFmpeg blur radius in pixels (default: 64; higher is stronger)",
+    )
+    parser.add_argument(
+        "--blur-opacity", type=_blur_opacity,
+        default=None if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL -w: blurred-layer opacity, 0–1 or 0%%–100%% (default: 1.0)",
+    )
+    parser.add_argument(
+        "--face-padding", type=_face_padding,
+        default=None if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL -w: symmetric physical-face expansion on x/y, 0–0.5 or 0%%–50%% (default: 16%%)",
+    )
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
+        "--aggressive", dest="aggressive", action="store_true",
+        default=None if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL -w: deprecated compatibility flag; whole-frame masking is disabled",
+    )
+    modes.add_argument(
+        "--balanced", dest="aggressive", action="store_false",
+        default=None if global_parser else argparse.SUPPRESS,
+        help="EXPERIMENTAL -w: use localized participant face/name regions",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     examples = """Examples:
   # Batch every video in a folder; finals go to outputs_sanitized/.
@@ -88,6 +174,9 @@ def build_parser() -> argparse.ArgumentParser:
 
   # Keep generated audit artifacts for debugging as well as final delivery copies.
   priv-sanitizer batch --input "$VIDEO_DIR" --keep-artifacts
+
+  # Experimental physical-camera/whiteboard face/name blur.
+  priv-sanitizer -w --blur-radius 96 --blur-opacity 100% --face-padding 20% -j8 -k
 """
     parser = argparse.ArgumentParser(
         prog="priv-sanitizer",
@@ -107,6 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-j", "--jobs", type=_positive_jobs, default=None,
         help="number of FFmpeg/filter threads (default: 8)",
     )
+    _add_privacy_options(parser, global_parser=True)
+    _add_whiteboard_option(parser, global_parser=True)
     _add_keep_artifacts_option(parser)
     sub = parser.add_subparsers(dest="command", required=False)
     parser.set_defaults(
@@ -116,6 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
         artifacts=None,
         experimental_audio=False,
         keep_artifacts=False,
+        whiteboard=False,
         every=4.0,
     )
 
@@ -130,6 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_quiet_option(batch_cmd)
     _add_jobs_option(batch_cmd)
     _add_keep_artifacts_option(batch_cmd)
+    _add_privacy_options(batch_cmd)
+    _add_whiteboard_option(batch_cmd)
     batch_cmd.add_argument("--input", type=_directory, default=Path.cwd())
     batch_cmd.add_argument("--output", type=Path, default=Path.cwd() / "outputs_sanitized")
     batch_cmd.add_argument(
@@ -154,6 +248,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(analyze)
     _add_quiet_option(analyze)
     _add_jobs_option(analyze)
+    _add_privacy_options(analyze)
+    _add_whiteboard_option(analyze)
     analyze.add_argument("job", type=Path)
     analyze.add_argument("--pass", dest="analysis_pass", choices=["baseline"], default="baseline")
     analyze.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
@@ -163,6 +259,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(sanitize)
     _add_quiet_option(sanitize)
     _add_jobs_option(sanitize)
+    _add_privacy_options(sanitize)
+    _add_whiteboard_option(sanitize)
     sanitize.add_argument("--video", type=_path, required=True)
     sanitize.add_argument("--output", type=Path, required=True)
     sanitize.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
@@ -172,6 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(harden_cmd)
     _add_quiet_option(harden_cmd)
     _add_jobs_option(harden_cmd)
+    _add_privacy_options(harden_cmd)
+    _add_whiteboard_option(harden_cmd)
     harden_cmd.add_argument("job", type=Path, help="baseline job directory")
     harden_cmd.add_argument("--transcript", type=_path, required=True)
     harden_cmd.add_argument("--job", dest="output_job", type=Path, required=True)
@@ -193,6 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(render)
     _add_quiet_option(render)
     _add_jobs_option(render)
+    _add_privacy_options(render)
+    _add_whiteboard_option(render)
     render.add_argument("job", type=Path)
     render.add_argument("--output", type=Path, required=True)
 
@@ -220,6 +322,16 @@ def main(argv: list[str] | None = None) -> None:
         os.environ["PRIV_SANITIZER_VERBOSE"] = "0"
     if args.jobs is not None:
         os.environ["PRIV_SANITIZER_FFMPEG_THREADS"] = str(args.jobs)
+    if args.whiteboard:
+        os.environ["PRIV_SANITIZER_WHITEBOARD"] = "1"
+    if args.blur_radius is not None:
+        os.environ["PRIV_SANITIZER_BLUR_RADIUS"] = str(args.blur_radius)
+    if args.blur_opacity is not None:
+        os.environ["PRIV_SANITIZER_BLUR_OPACITY"] = str(args.blur_opacity)
+    if args.face_padding is not None:
+        os.environ["PRIV_SANITIZER_FACE_PADDING"] = str(args.face_padding)
+    if args.aggressive is not None:
+        os.environ["PRIV_SANITIZER_AGGRESSIVE"] = "1" if args.aggressive else "0"
     try:
         if args.command == "batch":
             print(json.dumps(

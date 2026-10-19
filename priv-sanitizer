@@ -11,11 +11,15 @@ if [[ -f "${ROOT_DIR}/scripts/activate.sh" ]]; then
   source "${ROOT_DIR}/scripts/activate.sh" >/dev/null
 fi
 
-DOCKER_MODE="${PRIV_SANITIZER_USE_DOCKER:-auto}"
+# Native Python is the safe/default runtime.  Docker is deliberately opt-in
+# through the dedicated `priv-sanitizer-docker` wrapper or
+# PRIV_SANITIZER_USE_DOCKER=1, so a stale/optional image cannot unexpectedly
+# shadow the current checkout.
+DOCKER_MODE="${PRIV_SANITIZER_USE_DOCKER:-0}"
 DOCKER_RUNTIME_FILE="${ROOT_DIR}/.docker-runtime"
-if [[ "$DOCKER_MODE" == "1" || ( "$DOCKER_MODE" == "auto" && -f "$DOCKER_RUNTIME_FILE" ) ]]; then
+if [[ "$DOCKER_MODE" == "1" ]]; then
   command -v docker >/dev/null 2>&1 || {
-    printf '[priv-sanitizer] ERROR: Docker runtime is enabled but Docker is unavailable. Set PRIV_SANITIZER_USE_DOCKER=0 to use local Python.\n' >&2
+    printf '[priv-sanitizer] ERROR: Docker runtime was explicitly requested but Docker is unavailable. Use the native default or install Docker.\n' >&2
     exit 1
   }
   if [[ -f "$DOCKER_RUNTIME_FILE" ]]; then
@@ -31,19 +35,35 @@ if [[ "$DOCKER_MODE" == "1" || ( "$DOCKER_MODE" == "auto" && -f "$DOCKER_RUNTIME
     printf '[priv-sanitizer] ERROR: Docker image %s is unavailable; run scripts/install.sh --docker.\n' "$DOCKER_IMAGE" >&2
     exit 1
   }
-  DOCKER_ARGS=(run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/work" --workdir /work)
+  # Docker daemons may reject a symlinked host prefix (for example a workspace
+  # link into a shared mount). Resolve the caller directory before bind-mounting.
+  DOCKER_WORKDIR="$(pwd -P)"
+  DOCKER_ARGS=(run --rm --user "$(id -u):$(id -g)" --volume "$DOCKER_WORKDIR:/work" --workdir /work)
   # Preserve an interactive terminal so the container can animate progress;
   # redirected/piped runs remain non-interactive and line-oriented.
   if [[ -t 1 || -t 2 ]]; then
     DOCKER_ARGS+=(--tty)
     [[ -t 0 ]] && DOCKER_ARGS+=(--interactive)
   fi
-  for ENV_NAME in PRIV_SANITIZER_FFMPEG_THREADS PRIV_SANITIZER_X264_PRESET PRIV_SANITIZER_QUIET PRIV_SANITIZER_VERBOSE PRIV_SANITIZER_HEARTBEAT_SECONDS PRIV_SANITIZER_AUDIO_ANALYSIS; do
+  for ENV_NAME in PRIV_SANITIZER_WHITEBOARD PRIV_SANITIZER_FFMPEG_THREADS PRIV_SANITIZER_X264_PRESET PRIV_SANITIZER_QUIET PRIV_SANITIZER_VERBOSE PRIV_SANITIZER_HEARTBEAT_SECONDS PRIV_SANITIZER_AUDIO_ANALYSIS PRIV_SANITIZER_ADAPTIVE_SAMPLING PRIV_SANITIZER_DENSE_FACE_SAMPLING PRIV_SANITIZER_DENSE_FACE_FPS PRIV_SANITIZER_FACE_DIFF_THRESHOLD PRIV_SANITIZER_FACE_FALLBACK_SECONDS PRIV_SANITIZER_DENSE_FACE_WINDOWING PRIV_SANITIZER_DENSE_FACE_WINDOW_SECONDS PRIV_SANITIZER_DENSE_FACE_SPARSE_SECONDS PRIV_SANITIZER_SCENE_DETECTION PRIV_SANITIZER_SCENE_THRESHOLD PRIV_SANITIZER_SCENE_MERGE_SECONDS PRIV_SANITIZER_BLUR_RADIUS PRIV_SANITIZER_BLUR_OPACITY PRIV_SANITIZER_FACE_PADDING PRIV_SANITIZER_AGGRESSIVE; do
     if [[ -n "${!ENV_NAME:-}" ]]; then
       DOCKER_ARGS+=(--env "$ENV_NAME=${!ENV_NAME}")
     fi
   done
-  exec docker "${DOCKER_ARGS[@]}" "$DOCKER_IMAGE" "$@"
+  DOCKER_COMMAND=("$@")
+  for index in "${!DOCKER_COMMAND[@]}"; do
+    argument="${DOCKER_COMMAND[$index]}"
+    if [[ "$argument" == "$PWD" ]]; then
+      DOCKER_COMMAND[$index]="/work"
+    elif [[ "$argument" == "$PWD"/* ]]; then
+      DOCKER_COMMAND[$index]="/work/${argument#"$PWD"/}"
+    elif [[ "$argument" == "$DOCKER_WORKDIR" ]]; then
+      DOCKER_COMMAND[$index]="/work"
+    elif [[ "$argument" == "$DOCKER_WORKDIR"/* ]]; then
+      DOCKER_COMMAND[$index]="/work/${argument#"$DOCKER_WORKDIR"/}"
+    fi
+  done
+  exec docker "${DOCKER_ARGS[@]}" "$DOCKER_IMAGE" "${DOCKER_COMMAND[@]}"
 fi
 
 PYTHON_BIN="${PRIV_SANITIZER_PYTHON:-${PRIV_SANITIZER_VENV:-${ROOT_DIR}/.venv}/bin/python}"

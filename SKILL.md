@@ -13,9 +13,16 @@ The implementation lives beside this file. Run it through the CLI:
 python3 -m priv_sanitizer sanitize --video INPUT.mp4 --output OUTPUT_DIR
 ```
 
+For a physical-camera or whiteboard recording, opt into the experimental
+detector explicitly:
+
+```bash
+priv-sanitizer -w sanitize --video INPUT.mp4 --output OUTPUT_DIR
+```
+
 The executable `./priv-sanitizer` in this directory is a shorter wrapper for
-the same CLI. It selects the project runtime automatically and forwards all
-arguments.
+the same CLI. It uses the native Python runtime by default and forwards all
+arguments. Set `PRIV_SANITIZER_USE_DOCKER=1` to opt into Docker explicitly.
 
 The executable `./priv-sanitizer-docker` is the direct Docker wrapper. After
 `bash scripts/install.sh --docker-only`, call it from the recording folder to
@@ -41,13 +48,19 @@ to retain manifests, reports, and audit videos for debugging. The legacy
 paired automatically; a transcript is never required for baseline processing
 and is not rewritten or emitted.
 
-For a new machine, run `bash scripts/install.sh` and then
-`source scripts/activate.sh` first. The installer provisions the Python
-environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision dependencies.
+For a new machine, run `bash scripts/install.sh` once. The installer provisions
+the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision
+dependencies, and installs persistent user launchers in `~/.local/bin`; the
+`priv-sanitizer` command then works from any recording directory without
+activating a virtualenv. The installer persists that directory in
+`~/.profile.local` for future terminals. `source scripts/activate.sh` remains
+available for debugging or direct virtual-environment use.
+If you use that script, source it rather than executing `./scripts/activate.sh`
+so its environment changes persist in the current shell.
 For a Docker-only setup that avoids host Python dependencies, run
-`bash scripts/install.sh --docker-only`; the repository launcher then uses the
-configured image automatically. Use `priv-sanitizer-docker` when you want to
-explicitly select the Docker wrapper.
+`bash scripts/install.sh --docker-only`; use `priv-sanitizer-docker` from the
+recording folder to select the configured image. The regular `priv-sanitizer`
+launcher remains native-default and requires the host Python environment.
 
 The workflow has two passes:
 
@@ -62,9 +75,14 @@ manifest once as a fallback. A transcript is never used as a reason to encode
 the full recording twice.
 
 The detector stack records per-segment layout-model evidence, OCR evidence
-(Tesseract when installed), and face-detection evidence (OpenCV Haar when
-installed). It does not assume participants stay in a right-side rail: it
-also scans full-screen speaker/avatar views and arbitrary grid/tile positions.
+(Tesseract when installed), and the stable OpenCV Haar evidence when installed.
+The normal meeting path is intentionally unchanged from the stable release.
+Use `-w`/`--whiteboard` to opt into the experimental physical-camera path. That
+mode adds low-resolution frame-difference face sampling, multi-cascade temporal
+tracking, denser short-clip sampling, and localized feathered masks for
+whiteboards and arbitrary camera layouts. `--balanced`, `--blur-radius`,
+`--blur-opacity`, and `--face-padding` tune that mode and have no effect on the
+stable default renderer without `-w`.
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
 

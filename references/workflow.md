@@ -3,10 +3,9 @@
 ## Folder batch
 
 For a Docker-only installation, run `bash scripts/install.sh --docker-only`
-once. The repository launcher automatically uses the resulting image for later
-runs. The explicit `priv-sanitizer-docker` wrapper is also available. Set
-`PRIV_SANITIZER_USE_DOCKER=0` to use local Python temporarily through the
-regular launcher.
+once. The regular `priv-sanitizer` launcher remains native-default; use the
+explicit `priv-sanitizer-docker` wrapper (or set
+`PRIV_SANITIZER_USE_DOCKER=1`) to use the resulting image.
 
 From a directory containing recordings and optional same-stem transcripts:
 
@@ -16,6 +15,12 @@ video_dir="${VIDEO_DIR:-$PWD}"
 cd "$video_dir"
 "$tool_root/priv-sanitizer"
 ```
+
+After `bash scripts/install.sh`, the persistent `priv-sanitizer` launcher in
+`~/.local/bin` can be called directly from any directory; no activation step is
+required. Use the repository path above when `~/.local/bin` is not on `PATH`.
+If you activate manually, use `source scripts/activate.sh`; executing the file
+cannot modify the parent shell's environment.
 
 With no command arguments, the launcher scans only the current directory and
 is equivalent to:
@@ -32,6 +37,14 @@ debugging (`--keep-videos` is a compatibility alias). When a transcript is
 paired, baseline and hardening analysis finish before one final
 transcript-aware render; the baseline render is only a fallback if hardening
 fails.
+
+The baseline uses the stable coarse layout/OCR/Haar path plus the established
+scene-change triggers. The experimental physical-camera/whiteboard path is
+opt-in only: add `-w`/`--whiteboard` to enable frame-difference face sampling,
+multi-cascade temporal tracking, denser short-clip sampling, and localized
+feathered masks. `--blur-radius`, `--blur-opacity`, `--face-padding`, and the
+`PRIV_SANITIZER_DENSE_FACE_*` environment controls apply to that `-w` mode;
+without it the stable renderer remains unchanged.
 
 Audio is preserved by default. To opt in to experimental transcript-based name
 muting, add `--experimental-audio` to the batch command.
