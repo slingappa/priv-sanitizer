@@ -5,10 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from .media import ToolError, probe
 from .pipeline import batch, baseline, harden, read_json, render_job, verify_output, write_json
+
+
+# The no-argument launcher is intentionally conservative about compute and
+# visual treatment: it is the quick batch workflow users are most likely to
+# run from a recordings directory. Explicit commands retain the stronger
+# 100% visual default documented below.
+NO_ARGUMENT_JOBS = 8
+NO_ARGUMENT_BLUR_STRENGTH = 0.30
 
 
 def _path(value: str) -> Path:
@@ -141,7 +150,7 @@ def _add_privacy_options(parser: argparse.ArgumentParser, *, global_parser: bool
     parser.add_argument(
         "-b", "--blur-strength", type=_blur_strength,
         default=None if global_parser else argparse.SUPPRESS,
-        help="visual blur strength, 0–1 or 0%%–100%% (default: 100%%; 0%% disables visual blur)",
+        help="visual blur strength, 0–1 or 0%%–100%% (explicit-command default: 100%%; no-argument batch default: 30%%; 0%% disables visual blur)",
     )
     # Keep old command lines usable without advertising two competing controls
     # in help. New manifests and renders use --blur-strength.
@@ -399,7 +408,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    no_arguments = not raw_argv
+    args = build_parser().parse_args(raw_argv)
+    if no_arguments:
+        # Keep the direct Python/console-entry-point path consistent with the
+        # repository launcher, which injects these same options for no-arg
+        # invocations. Explicit `batch`/`sanitize` commands are unaffected.
+        args.jobs = NO_ARGUMENT_JOBS
+        args.blur_strength = NO_ARGUMENT_BLUR_STRENGTH
     if args.verbose:
         os.environ["PRIV_SANITIZER_VERBOSE"] = "1"
     if args.quiet:

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 from unittest.mock import patch
 
 from priv_sanitizer import pipeline
@@ -12,6 +13,34 @@ def test_no_args_defaults_to_batch_in_current_directory(tmp_path, monkeypatch):
     assert args.command == "batch"
     assert args.input == tmp_path
     assert args.output == tmp_path / "outputs_sanitized"
+
+
+def test_no_argument_main_uses_quick_batch_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    observed = {}
+    env_keys = ("PRIV_SANITIZER_FFMPEG_THREADS", "PRIV_SANITIZER_BLUR_STRENGTH")
+    previous_env = {key: os.environ.get(key) for key in env_keys}
+
+    def fake_batch(*args, **kwargs):
+        observed.update(kwargs)
+        return {"completed_count": 0}
+
+    try:
+        with patch("priv_sanitizer.cli.batch", side_effect=fake_batch):
+            from priv_sanitizer.cli import main
+
+            main([])
+
+        assert observed["keep_artifacts"] is False
+        assert observed["every"] == 4.0
+        assert os.environ["PRIV_SANITIZER_FFMPEG_THREADS"] == "8"
+        assert os.environ["PRIV_SANITIZER_BLUR_STRENGTH"] == "0.3"
+    finally:
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_jobs_option_accepts_global_and_batch_forms():

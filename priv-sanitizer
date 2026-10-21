@@ -84,6 +84,8 @@ export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 # that directory's outputs_sanitized/ folder.
 if (($# == 0)); then
   exec "$PYTHON_BIN" -m priv_sanitizer batch \
+    -j 8 \
+    -b 30% \
     --input "$PWD" \
     --output "$PWD/outputs_sanitized" \
     --artifacts "$PWD/artifacts"

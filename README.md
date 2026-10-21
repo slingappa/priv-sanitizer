@@ -22,11 +22,12 @@ From a folder containing recordings:
 
 ```bash
 cd /path/to/recordings
-priv-sanitizer -j8
+priv-sanitizer
 ```
 
 With no command or arguments, it batch-processes supported videos in the
-current directory. Final files are placed here:
+current directory with `-j8 -b 30%` (8 FFmpeg/filter threads and a moderate
+blur-strength quick default). Final files are placed here:
 
 ```text
 recordings/
@@ -108,7 +109,7 @@ recording.
 or percentage from `0` to `1` / `0%` to `100%`:
 
 ```bash
-# Privacy delivery: strongest opaque blur (also the default).
+# Privacy delivery: strongest opaque blur for an explicit command.
 priv-sanitizer -j8 -b 100%
 
 # Reduced blur for a controlled review copy.
