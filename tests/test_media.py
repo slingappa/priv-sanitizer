@@ -9,7 +9,8 @@ import sys
 from priv_sanitizer.media import (
     _blur_filter_graph,
     _sample_entries,
-    configured_blur_opacity,
+    blur_radius_for_strength,
+    configured_blur_strength,
     configured_face_padding,
     effective_privacy_settings,
     detect_visual_regions,
@@ -58,24 +59,31 @@ def test_dense_face_sampling_is_enabled_for_normal_meetings(monkeypatch):
     assert dense_face_sampling_enabled() is True
 
 
-def test_effective_privacy_settings_are_stable_unless_whiteboard_is_opted_in(monkeypatch):
+def test_effective_privacy_settings_use_configured_strength(monkeypatch):
     monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
-    monkeypatch.setenv("PRIV_SANITIZER_BLUR_RADIUS", "96")
-    monkeypatch.setenv("PRIV_SANITIZER_BLUR_OPACITY", "50%")
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_STRENGTH", "50%")
     monkeypatch.setenv("PRIV_SANITIZER_FACE_PADDING", "30%")
     assert effective_privacy_settings() == {
         "whiteboard": False,
-        "blur_radius": 18,
+        "blur_strength": 0.5,
+        "blur_radius": 64,
         "blur_opacity": 1.0,
         "face_padding": None,
     }
     monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
     assert effective_privacy_settings() == {
         "whiteboard": True,
-        "blur_radius": 96,
-        "blur_opacity": 0.5,
+        "blur_strength": 0.5,
+        "blur_radius": 64,
+        "blur_opacity": 1.0,
         "face_padding": 0.3,
     }
+
+
+def test_blur_strength_maps_zero_to_no_blur_and_full_to_max_radius():
+    assert blur_radius_for_strength(0.0) == 0
+    assert blur_radius_for_strength(0.5) == 64
+    assert blur_radius_for_strength(1.0) == 128
 
 
 def test_blur_graph_is_regional_not_black_fill():
@@ -85,17 +93,46 @@ def test_blur_graph_is_regional_not_black_fill():
     assert output == "[vout]"
 
 
-def test_blur_graph_accepts_stronger_radius(monkeypatch):
+def test_normal_blur_graph_applies_configured_strength(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_STRENGTH", "50%")
+    graph, _ = _blur_filter_graph(LAYOUT)
+    assert "luma_radius=min(64\\,min(w\\,h)/2-1)" in graph
+    assert "colorchannelmixer" not in graph
+
+
+def test_normal_blur_graph_uses_strength_radius_and_bounds_small_crops(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    graph, _ = _blur_filter_graph(LAYOUT, blur_strength=0.75)
+    assert "luma_radius=min(96\\,min(w\\,h)/2-1)" in graph
+    assert "chroma_radius=max(0\\,min(10\\,min(w\\,h)/4-1))" in graph
+
+
+def test_normal_zero_strength_leaves_blur_regions_unmodified(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    graph, _ = _blur_filter_graph(LAYOUT, blur_strength=0.0)
+    assert "boxblur" not in graph
+    assert graph == "[0:v]null[vout]"
+
+
+def test_normal_blur_graph_default_remains_opaque(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    monkeypatch.delenv("PRIV_SANITIZER_BLUR_STRENGTH", raising=False)
+    graph, _ = _blur_filter_graph(LAYOUT)
+    assert "colorchannelmixer" not in graph
+
+
+def test_blur_graph_accepts_strength_in_whiteboard_mode(monkeypatch):
     monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
-    graph, _ = _blur_filter_graph(LAYOUT, blur_radius=48)
+    graph, _ = _blur_filter_graph(LAYOUT, blur_strength=0.375)
     assert "luma_radius=min(48\\,min(w\\,h)/2-1)" in graph
 
 
-def test_blur_graph_applies_configured_opacity(monkeypatch):
+def test_blur_graph_strength_is_opaque_in_whiteboard_mode(monkeypatch):
     monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
-    graph, _ = _blur_filter_graph(LAYOUT, blur_radius=48, blur_opacity=0.5)
-    assert "format=rgba,colorchannelmixer=aa=0.500000" in graph
-    assert "colorchannelmixer=aa=0.500000" in graph
+    graph, _ = _blur_filter_graph(LAYOUT, blur_strength=0.5)
+    assert "luma_radius=min(64\\,min(w\\,h)/2-1)" in graph
+    assert "colorchannelmixer" not in graph
 
 
 def test_physical_face_graph_uses_feathered_ellipse(monkeypatch):
@@ -103,7 +140,7 @@ def test_physical_face_graph_uses_feathered_ellipse(monkeypatch):
     graph, _ = _blur_filter_graph([{
         "kind": "physical_face", "mode": "blur",
         "box": [0.1, 0.2, 0.3, 0.3], "start": 0.0, "end": 1.0,
-    }], blur_radius=48, blur_opacity=1.0)
+    }], blur_strength=0.375)
     assert "geq=" in graph
     assert "lte(" in graph and "gte(" in graph
     assert "0.6" in graph
@@ -124,11 +161,12 @@ def test_whiteboard_render_graph_is_gated_by_mode(monkeypatch):
     assert "geq=" in whiteboard_graph
 
 
-def test_blur_opacity_defaults_to_fully_opaque(monkeypatch):
+def test_blur_strength_defaults_to_maximum(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_BLUR_STRENGTH", raising=False)
     monkeypatch.delenv("PRIV_SANITIZER_BLUR_OPACITY", raising=False)
-    assert configured_blur_opacity() == 1.0
-    monkeypatch.setenv("PRIV_SANITIZER_BLUR_OPACITY", "75%")
-    assert configured_blur_opacity() == 0.75
+    assert configured_blur_strength() == 1.0
+    monkeypatch.setenv("PRIV_SANITIZER_BLUR_STRENGTH", "75%")
+    assert configured_blur_strength() == 0.75
 
 
 def test_face_padding_is_symmetric_and_configurable(monkeypatch):
@@ -140,7 +178,7 @@ def test_face_padding_is_symmetric_and_configurable(monkeypatch):
     assert configured_face_padding() == 0.08
 
 
-def test_render_result_reports_manifest_opacity(tmp_path, monkeypatch):
+def test_render_result_reports_manifest_strength(tmp_path, monkeypatch):
     source = tmp_path / "input.mp4"
     source.write_bytes(b"source")
     output = tmp_path / "rendered" / "sanitized.mp4"
@@ -153,7 +191,7 @@ def test_render_result_reports_manifest_opacity(tmp_path, monkeypatch):
             "kind": "participant_tile", "mode": "blur",
             "box": [0.5, 0.0, 0.5, 1.0], "start": 0.0, "end": 1.0,
         }],
-        "privacy": {"blur_radius": 48, "blur_opacity": 0.5},
+        "privacy": {"blur_strength": 0.5},
     }
 
     def fake_run(args, **kwargs):
@@ -162,10 +200,44 @@ def test_render_result_reports_manifest_opacity(tmp_path, monkeypatch):
 
     with patch("priv_sanitizer.media.run", side_effect=fake_run):
         monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
+        monkeypatch.delenv("PRIV_SANITIZER_BLUR_STRENGTH", raising=False)
+        result = render(source, manifest, output)
+    assert result["blur_strength"] == 0.5
+    assert result["blur_radius"] == 64
+    assert result["blur_opacity"] == 1.0
+    assert output.read_bytes() == b"rendered"
+
+
+def test_normal_render_keeps_legacy_manifest_controls(tmp_path, monkeypatch):
+    source = tmp_path / "input.mp4"
+    source.write_bytes(b"source")
+    output = tmp_path / "rendered" / "sanitized.mp4"
+    manifest = {
+        "source": {"video": str(source)},
+        "video": {"duration": 1.0},
+        "audio_mode": "preserve",
+        "audio_redactions": [],
+        "visual_redactions": [{
+            "kind": "participant_panel", "mode": "blur",
+            "box": [0.5, 0.0, 0.5, 1.0], "start": 0.0, "end": 1.0,
+        }],
+        "privacy": {"blur_radius": 18, "blur_opacity": 0.5},
+    }
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        Path(args[-1]).write_bytes(b"rendered")
+        return __import__("subprocess").CompletedProcess(args, 0, stderr="")
+
+    with patch("priv_sanitizer.media.run", side_effect=fake_run):
+        monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
         monkeypatch.delenv("PRIV_SANITIZER_BLUR_OPACITY", raising=False)
         result = render(source, manifest, output)
-    assert result["blur_radius"] == 48
+    assert result["blur_radius"] == 18
     assert result["blur_opacity"] == 0.5
+    assert result["blur_strength"] == 0.140625
+    assert any("colorchannelmixer=aa=0.500000" in str(arg) for arg in captured["args"])
     assert output.read_bytes() == b"rendered"
 
 

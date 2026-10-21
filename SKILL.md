@@ -81,8 +81,11 @@ multi-cascade temporal tracking, and bounded safety gaps for fullscreen
 single/multi-face scenes and static avatars. Use `-w`/`--whiteboard` to opt into
 the experimental physical-camera path; that mode uses a denser default scan
 and localized feathered masks for whiteboards and arbitrary camera layouts.
-`--balanced`, `--blur-radius`, `--blur-opacity`, and `--face-padding` tune that
-localized mode and have no effect on the stable normal renderer without `-w`.
+`--balanced` and `--face-padding` tune that localized mode. The single
+`-b`/`--blur-strength` control applies to both renderers and accepts `0`–`1` or
+`0%`–`100%`: `0%` leaves visual regions unchanged and `100%` applies the
+strongest opaque blur. Lower values are weaker review settings; the default is
+`100%`. Older radius/opacity flags remain compatibility-only aliases.
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
 

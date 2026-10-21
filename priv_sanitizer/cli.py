@@ -105,6 +105,22 @@ def _blur_opacity(value: str) -> float:
     return opacity
 
 
+def _blur_strength(value: str) -> float:
+    """Parse the single visual blur-strength control as a fraction/percentage."""
+    text = value.strip()
+    try:
+        strength = float(text[:-1]) / 100.0 if text.endswith("%") else float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "blur strength must be a number from 0 to 1 (or 0% to 100%)"
+        ) from exc
+    if not 0.0 <= strength <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "blur strength must be a number from 0 to 1 (or 0% to 100%)"
+        )
+    return strength
+
+
 def _face_padding(value: str) -> float:
     """Parse symmetric physical-face expansion as a fraction or percentage."""
     text = value.strip()
@@ -123,14 +139,19 @@ def _face_padding(value: str) -> float:
 
 def _add_privacy_options(parser: argparse.ArgumentParser, *, global_parser: bool = False) -> None:
     parser.add_argument(
-        "--blur-radius", type=_blur_radius,
+        "-b", "--blur-strength", type=_blur_strength,
         default=None if global_parser else argparse.SUPPRESS,
-        help="EXPERIMENTAL -w: FFmpeg blur radius in pixels (default: 64; higher is stronger)",
+        help="visual blur strength, 0–1 or 0%%–100%% (default: 100%%; 0%% disables visual blur)",
+    )
+    # Keep old command lines usable without advertising two competing controls
+    # in help. New manifests and renders use --blur-strength.
+    parser.add_argument(
+        "--blur-radius", type=_blur_radius, dest="legacy_blur_radius",
+        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--blur-opacity", type=_blur_opacity,
-        default=None if global_parser else argparse.SUPPRESS,
-        help="EXPERIMENTAL -w: blurred-layer opacity, 0–1 or 0%%–100%% (default: 1.0)",
+        "--blur-opacity", type=_blur_opacity, dest="legacy_blur_opacity",
+        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--face-padding", type=_face_padding,
@@ -147,6 +168,31 @@ def _add_privacy_options(parser: argparse.ArgumentParser, *, global_parser: bool
         "--balanced", dest="aggressive", action="store_false",
         default=None if global_parser else argparse.SUPPRESS,
         help="EXPERIMENTAL -w: use localized participant face/name regions",
+    )
+
+
+def _add_batch_options(parser: argparse.ArgumentParser) -> None:
+    """Add options shared by explicit and no-argument batch mode."""
+    parser.add_argument(
+        "--input", type=_directory, default=argparse.SUPPRESS, metavar="DIR",
+        help="folder containing videos and optional same-stem transcripts (default: current directory)",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=argparse.SUPPRESS, metavar="DIR",
+        help="folder for final sanitized videos (default: ./outputs_sanitized)",
+    )
+    parser.add_argument(
+        "--artifacts", type=Path, default=argparse.SUPPRESS, metavar="DIR",
+        help="audit directory; artifacts are removed unless -k is used (default: ./artifacts)",
+    )
+    parser.add_argument(
+        "--experimental-audio", "--experimental-audio-redaction",
+        action="store_true", dest="experimental_audio", default=argparse.SUPPRESS,
+        help="EXPERIMENTAL: use transcript matches for short spoken-name mute windows",
+    )
+    parser.add_argument(
+        "--every", type=float, default=argparse.SUPPRESS, metavar="SECONDS",
+        help="coarse frame sampling interval in seconds (default: 4)",
     )
 
 
@@ -175,8 +221,16 @@ def build_parser() -> argparse.ArgumentParser:
   # Keep generated audit artifacts for debugging as well as final delivery copies.
   priv-sanitizer batch --input "$VIDEO_DIR" --keep-artifacts
 
+  # Tune visual blur strength; 100% is recommended for privacy.
+  priv-sanitizer -j8 -k -b 100%
+
   # Experimental physical-camera/whiteboard face/name blur.
-  priv-sanitizer -w --blur-radius 96 --blur-opacity 100% --face-padding 20% -j8 -k
+  priv-sanitizer -w -b 100% --face-padding 20% -j8 -k
+
+  # Show every option for a specific workflow.
+  priv-sanitizer batch --help
+  priv-sanitizer harden --help
+  priv-sanitizer render --help
 """
     parser = argparse.ArgumentParser(
         prog="priv-sanitizer",
@@ -199,6 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_privacy_options(parser, global_parser=True)
     _add_whiteboard_option(parser, global_parser=True)
     _add_keep_artifacts_option(parser)
+    _add_batch_options(parser)
     sub = parser.add_subparsers(dest="command", required=False)
     parser.set_defaults(
         command="batch",
@@ -224,25 +279,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_keep_artifacts_option(batch_cmd)
     _add_privacy_options(batch_cmd)
     _add_whiteboard_option(batch_cmd)
-    batch_cmd.add_argument("--input", type=_directory, default=Path.cwd())
-    batch_cmd.add_argument("--output", type=Path, default=Path.cwd() / "outputs_sanitized")
-    batch_cmd.add_argument(
-        "--artifacts", type=Path, default=None,
-        help="audit directory (default: sibling ./artifacts directory)",
-    )
-    batch_cmd.add_argument(
-        "--experimental-audio", "--experimental-audio-redaction",
-        action="store_true", dest="experimental_audio", default=False,
-        help="EXPERIMENTAL: mute transcript-matched spoken-name windows",
-    )
-    batch_cmd.add_argument("--every", type=float, default=4.0)
+    _add_batch_options(batch_cmd)
 
     inspect = sub.add_parser("inspect", help="probe a video and initialize a job")
     _add_verbose_option(inspect)
     _add_quiet_option(inspect)
     _add_jobs_option(inspect)
-    inspect.add_argument("video", type=_path)
-    inspect.add_argument("--job", type=Path, required=True)
+    inspect.add_argument(
+        "video", type=_path,
+        help="input video to probe (MP4, MOV, AVI, MKV, WEBM, or M4V)",
+    )
+    inspect.add_argument(
+        "--job", type=Path, required=True, metavar="DIR",
+        help="job directory to initialize with probe.json",
+    )
 
     analyze = sub.add_parser("analyze", help="run baseline video-only analysis")
     _add_verbose_option(analyze)
@@ -250,10 +300,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_jobs_option(analyze)
     _add_privacy_options(analyze)
     _add_whiteboard_option(analyze)
-    analyze.add_argument("job", type=Path)
-    analyze.add_argument("--pass", dest="analysis_pass", choices=["baseline"], default="baseline")
-    analyze.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
-    analyze.add_argument("--every", type=float, default=4.0)
+    analyze.add_argument("job", type=Path, help="job directory created by inspect")
+    analyze.add_argument(
+        "--pass", dest="analysis_pass", choices=["baseline"], default="baseline",
+        help="analysis pass to run (currently only baseline)",
+    )
+    analyze.add_argument(
+        "--audio-mode", choices=["preserve", "mute-names"], default="preserve",
+        help="baseline audio policy (default: preserve)",
+    )
+    analyze.add_argument(
+        "--every", type=float, default=4.0, metavar="SECONDS",
+        help="coarse frame sampling interval in seconds (default: 4)",
+    )
 
     sanitize = sub.add_parser("sanitize", help="run baseline analysis and render")
     _add_verbose_option(sanitize)
@@ -261,10 +320,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_jobs_option(sanitize)
     _add_privacy_options(sanitize)
     _add_whiteboard_option(sanitize)
-    sanitize.add_argument("--video", type=_path, required=True)
-    sanitize.add_argument("--output", type=Path, required=True)
-    sanitize.add_argument("--audio-mode", choices=["preserve", "mute-names"], default="preserve")
-    sanitize.add_argument("--every", type=float, default=4.0)
+    sanitize.add_argument(
+        "--video", type=_path, required=True, metavar="FILE",
+        help="input video to sanitize",
+    )
+    sanitize.add_argument(
+        "--output", type=Path, required=True, metavar="DIR",
+        help="output directory for sanitized.mp4 and job files",
+    )
+    sanitize.add_argument(
+        "--audio-mode", choices=["preserve", "mute-names"], default="preserve",
+        help="audio policy (default: preserve; spoken-name muting is experimental)",
+    )
+    sanitize.add_argument(
+        "--every", type=float, default=4.0, metavar="SECONDS",
+        help="coarse frame sampling interval in seconds (default: 4)",
+    )
 
     harden_cmd = sub.add_parser("harden", help="apply optional transcript-assisted hardening")
     _add_verbose_option(harden_cmd)
@@ -273,8 +344,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_privacy_options(harden_cmd)
     _add_whiteboard_option(harden_cmd)
     harden_cmd.add_argument("job", type=Path, help="baseline job directory")
-    harden_cmd.add_argument("--transcript", type=_path, required=True)
-    harden_cmd.add_argument("--job", dest="output_job", type=Path, required=True)
+    harden_cmd.add_argument(
+        "--transcript", type=_path, required=True, metavar="FILE",
+        help="DOCX, SRT, or VTT transcript used as secondary evidence",
+    )
+    harden_cmd.add_argument(
+        "--job", dest="output_job", type=Path, required=True, metavar="DIR",
+        help="output job directory for the hardened manifest",
+    )
     harden_cmd.add_argument(
         "--transcript-offset", type=float, default=0.0,
         help="seconds to subtract from transcript timestamps (needed for extracted clips)",
@@ -286,7 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     harden_cmd.add_argument(
         "--no-audio-redaction", action="store_false", dest="narrow_audio",
-        help=argparse.SUPPRESS,
+        help="disable transcript-matched audio muting (compatibility override)",
     )
 
     render = sub.add_parser("render", help="render a job manifest")
@@ -295,21 +372,29 @@ def build_parser() -> argparse.ArgumentParser:
     _add_jobs_option(render)
     _add_privacy_options(render)
     _add_whiteboard_option(render)
-    render.add_argument("job", type=Path)
-    render.add_argument("--output", type=Path, required=True)
+    render.add_argument(
+        "job", type=Path, help="job directory containing redaction-manifest.json",
+    )
+    render.add_argument(
+        "--output", type=Path, required=True, metavar="DIR",
+        help="output directory for sanitized.mp4 and render.json",
+    )
 
     report = sub.add_parser("report", help="print a job report")
     _add_verbose_option(report)
     _add_quiet_option(report)
     _add_jobs_option(report)
-    report.add_argument("job", type=Path)
+    report.add_argument("job", type=Path, help="job directory containing report.txt")
 
     verify = sub.add_parser("verify", help="verify a rendered output")
     _add_verbose_option(verify)
     _add_quiet_option(verify)
     _add_jobs_option(verify)
-    verify.add_argument("job", type=Path)
-    verify.add_argument("--output", type=Path, required=True)
+    verify.add_argument("job", type=Path, help="job directory containing the manifest")
+    verify.add_argument(
+        "--output", type=Path, required=True, metavar="DIR",
+        help="directory containing the sanitized.mp4 to verify",
+    )
     return parser
 
 
@@ -324,10 +409,22 @@ def main(argv: list[str] | None = None) -> None:
         os.environ["PRIV_SANITIZER_FFMPEG_THREADS"] = str(args.jobs)
     if args.whiteboard:
         os.environ["PRIV_SANITIZER_WHITEBOARD"] = "1"
-    if args.blur_radius is not None:
-        os.environ["PRIV_SANITIZER_BLUR_RADIUS"] = str(args.blur_radius)
-    if args.blur_opacity is not None:
-        os.environ["PRIV_SANITIZER_BLUR_OPACITY"] = str(args.blur_opacity)
+    if args.blur_strength is not None:
+        os.environ["PRIV_SANITIZER_BLUR_STRENGTH"] = str(args.blur_strength)
+    # Compatibility for pre-strength command lines. These values are only
+    # exact for old manifests; for new jobs they are translated to the single
+    # strength scale so old scripts continue to produce a sensible result.
+    if getattr(args, "legacy_blur_radius", None) is not None:
+        os.environ["PRIV_SANITIZER_BLUR_RADIUS"] = str(args.legacy_blur_radius)
+    if getattr(args, "legacy_blur_opacity", None) is not None:
+        os.environ["PRIV_SANITIZER_BLUR_OPACITY"] = str(args.legacy_blur_opacity)
+    if args.blur_strength is None and "PRIV_SANITIZER_BLUR_STRENGTH" not in os.environ:
+        if getattr(args, "legacy_blur_radius", None) is not None:
+            os.environ["PRIV_SANITIZER_BLUR_STRENGTH"] = str(
+                args.legacy_blur_radius / 128.0
+            )
+        elif getattr(args, "legacy_blur_opacity", None) is not None:
+            os.environ["PRIV_SANITIZER_BLUR_STRENGTH"] = str(args.legacy_blur_opacity)
     if args.face_padding is not None:
         os.environ["PRIV_SANITIZER_FACE_PADDING"] = str(args.face_padding)
     if args.aggressive is not None:

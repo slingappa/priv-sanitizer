@@ -432,13 +432,37 @@ def dense_face_sparse_seconds() -> float:
         return 4.0
 
 
-def configured_blur_radius() -> int:
-    """Return the FFmpeg luma blur radius used for visual redactions.
+BLUR_STRENGTH_MAX_RADIUS = 128
 
-    Radius is intentionally configurable because privacy review may prefer a
-    stronger mask than the normal 64-pixel default.  It is clamped to a range
-    supported by FFmpeg and to a value that remains practical for small crops.
+
+def configured_blur_strength() -> float:
+    """Return the single user-facing visual blur strength (0..1).
+
+    ``PRIV_SANITIZER_BLUR_OPACITY`` remains a compatibility fallback for jobs
+    created before ``--blur-strength`` replaced the confusing radius/opacity
+    pair.  New jobs always use the strength setting and an opaque blur layer.
     """
+    value = os.environ.get(
+        "PRIV_SANITIZER_BLUR_STRENGTH",
+        os.environ.get("PRIV_SANITIZER_BLUR_OPACITY", "1.0"),
+    ).strip()
+    try:
+        strength = float(value[:-1]) / 100.0 if value.endswith("%") else float(value)
+        return max(0.0, min(1.0, strength))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def blur_radius_for_strength(strength: float) -> int:
+    """Map 0..1 blur strength to the strongest practical FFmpeg radius."""
+    value = max(0.0, min(1.0, float(strength)))
+    if value <= 0.0:
+        return 0
+    return max(1, min(BLUR_STRENGTH_MAX_RADIUS, round(BLUR_STRENGTH_MAX_RADIUS * value)))
+
+
+def configured_blur_radius() -> int:
+    """Return the legacy FFmpeg radius override, if one was supplied."""
     try:
         return max(1, min(128, int(os.environ.get("PRIV_SANITIZER_BLUR_RADIUS", "64"))))
     except (TypeError, ValueError):
@@ -446,7 +470,7 @@ def configured_blur_radius() -> int:
 
 
 def configured_blur_opacity() -> float:
-    """Return how much of the blurred layer replaces the original (0..1)."""
+    """Return the legacy blurred-layer opacity override (0..1)."""
     try:
         value = os.environ.get("PRIV_SANITIZER_BLUR_OPACITY", "1.0").strip()
         opacity = float(value[:-1]) / 100.0 if value.endswith("%") else float(value)
@@ -459,8 +483,8 @@ def configured_face_padding() -> float:
     """Return symmetric physical-face expansion as a fraction of the box.
 
     The same value is applied horizontally and vertically.  It is deliberately
-    separate from blur radius: padding controls how far the redaction reaches,
-    while radius controls how strongly pixels inside it are blurred.
+    separate from blur strength: padding controls how far the redaction reaches,
+    while strength controls how strongly pixels inside it are blurred.
     """
     try:
         value = os.environ.get("PRIV_SANITIZER_FACE_PADDING", "0.16").strip()
@@ -479,23 +503,26 @@ def whiteboard_mode_enabled() -> bool:
 def effective_privacy_settings() -> dict[str, Any]:
     """Return the settings actually used by the selected rendering mode.
 
-    The pre-whiteboard meeting renderer is intentionally kept stable: it uses
-    the historical radius-18 opaque blur and has no physical-face padding
-    setting.  The newer radius/opacity/padding controls only apply after the
-    explicit ``-w`` opt-in, so manifests and reports must not imply that those
-    controls affected a normal meeting run.
+    Both renderers share one user-facing blur-strength control.  Strength is
+    mapped to an opaque FFmpeg blur radius from 0 to 128 pixels; zero skips
+    the visual blur graph entirely.  The normal renderer keeps its established
+    layout detector and has no physical-face padding setting.
     """
+    strength = configured_blur_strength()
+    radius = blur_radius_for_strength(strength)
     if not whiteboard_mode_enabled():
         return {
             "whiteboard": False,
-            "blur_radius": 18,
+            "blur_strength": strength,
+            "blur_radius": radius,
             "blur_opacity": 1.0,
             "face_padding": None,
         }
     return {
         "whiteboard": True,
-        "blur_radius": configured_blur_radius(),
-        "blur_opacity": configured_blur_opacity(),
+        "blur_strength": strength,
+        "blur_radius": radius,
+        "blur_opacity": 1.0,
         "face_padding": configured_face_padding(),
     }
 
@@ -2313,8 +2340,23 @@ def _enable(interval: dict[str, Any]) -> str:
     return f"between(t,{float(interval['start']):.3f},{float(interval['end']):.3f})"
 
 
-def _blur_filter_graph_legacy(visual: list[dict[str, Any]]) -> tuple[str, str]:
-    """Stable meeting render graph from the pre-whiteboard path."""
+def _blur_filter_graph_legacy(
+    visual: list[dict[str, Any]], *, blur_radius: int | None = None,
+    blur_opacity: float | None = None,
+    blur_strength: float | None = None,
+) -> tuple[str, str]:
+    """Stable meeting graph with one strength control plus old compatibility."""
+    if blur_strength is not None:
+        radius = blur_radius_for_strength(blur_strength)
+        opacity = 1.0
+    else:
+        radius = configured_blur_radius() if blur_radius is None else max(
+            1, min(128, int(blur_radius))
+        )
+        opacity = configured_blur_opacity() if blur_opacity is None else max(
+            0.0, min(1.0, float(blur_opacity))
+        )
+    safe_chroma_radius = "max(0\\,min(10\\,min(w\\,h)/4-1))"
     current = "0:v"
     filters: list[str] = []
     for index, item in enumerate(visual):
@@ -2328,11 +2370,29 @@ def _blur_filter_graph_legacy(visual: list[dict[str, Any]]) -> tuple[str, str]:
             )
             current = next_label
             continue
+        if blur_strength is not None and float(blur_strength) <= 0.0:
+            continue
+        # A zero opacity is an explicit no-blur request.  Do not run a
+        # transparent crop/overlay graph: leaving the source untouched is
+        # faster and makes the 0% contract exact.
+        if opacity <= 0.0:
+            continue
         base, roi, blurred, next_label = (f"b{index}", f"r{index}", f"z{index}", f"v{index}")
         filters.append(f"[{current}]split=2[{base}][{roi}]")
+        alpha = ""
+        if opacity < 1.0:
+            # The crop is normally YUV and therefore has no alpha plane.
+            # Convert the blurred crop to RGBA before lowering its alpha so
+            # FFmpeg's overlay blends it with the original region correctly.
+            alpha = f",format=rgba,colorchannelmixer=aa={opacity:.6f}"
         filters.append(
             f"[{roi}]crop=w=iw*{w}:h=ih*{h}:x=iw*{x}:y=ih*{y},"
-            f"boxblur=luma_radius=18:luma_power=2:chroma_radius=0:chroma_power=0:enable='{enable}'[{blurred}]"
+            # Bound the radius for a small participant crop. At 100% the
+            # strength mapping requests radius 128, materially stronger than
+            # the historical radius-18 blur, while the crop-size expression
+            # keeps tiny participant regions valid.
+            f"boxblur=luma_radius=min({radius}\\,min(w\\,h)/2-1):luma_power=2:"
+            f"chroma_radius={safe_chroma_radius}:chroma_power=2:enable='{enable}'{alpha}[{blurred}]"
         )
         filters.append(
             f"[{base}][{blurred}]overlay=x=main_w*{x}:y=main_h*{y}:enable='{enable}'[{next_label}]"
@@ -2344,15 +2404,20 @@ def _blur_filter_graph_legacy(visual: list[dict[str, Any]]) -> tuple[str, str]:
 def _blur_filter_graph(
     visual: list[dict[str, Any]], *, blur_radius: int | None = None,
     blur_opacity: float | None = None,
+    blur_strength: float | None = None,
     frame_width: int | None = None,
     frame_height: int | None = None,
 ) -> tuple[str, str]:
     if not whiteboard_mode_enabled():
-        return _blur_filter_graph_legacy(visual)
+        return _blur_filter_graph_legacy(
+            visual, blur_radius=blur_radius, blur_opacity=blur_opacity,
+            blur_strength=blur_strength,
+        )
     return _blur_filter_graph_whiteboard(
         visual,
         blur_radius=blur_radius,
         blur_opacity=blur_opacity,
+        blur_strength=blur_strength,
         frame_width=frame_width,
         frame_height=frame_height,
     )
@@ -2361,11 +2426,17 @@ def _blur_filter_graph(
 def _blur_filter_graph_whiteboard(
     visual: list[dict[str, Any]], *, blur_radius: int | None = None,
     blur_opacity: float | None = None,
+    blur_strength: float | None = None,
     frame_width: int | None = None,
     frame_height: int | None = None,
 ) -> tuple[str, str]:
-    radius = configured_blur_radius() if blur_radius is None else max(1, min(128, int(blur_radius)))
-    opacity = configured_blur_opacity() if blur_opacity is None else max(0.0, min(1.0, float(blur_opacity)))
+    if blur_strength is not None:
+        radius = blur_radius_for_strength(blur_strength)
+        opacity = 1.0
+    else:
+        radius = configured_blur_radius() if blur_radius is None else max(1, min(128, int(blur_radius)))
+        opacity = configured_blur_opacity() if blur_opacity is None else max(0.0, min(1.0, float(blur_opacity)))
+    safe_chroma_radius = "max(0\\,min(10\\,min(w\\,h)/4-1))"
     current = "0:v"
     filters: list[str] = []
     for index, item in enumerate(visual):
@@ -2378,6 +2449,8 @@ def _blur_filter_graph_whiteboard(
                 f"[{current}]drawbox=x=iw*{x}:y=ih*{y}:w=iw*{w}:h=ih*{h}:color=black@1:t=fill:enable='{enable}'[{next_label}]"
             )
             current = next_label
+            continue
+        if blur_strength is not None and float(blur_strength) <= 0.0:
             continue
         base, roi, blurred, next_label = (f"b{index}", f"r{index}", f"z{index}", f"v{index}")
         filters.append(f"[{current}]split=2[{base}][{roi}]")
@@ -2427,6 +2500,7 @@ def _blur_filter_graph_whiteboard(
                 work_height = max(2, (crop_height // 4) // 2 * 2)
                 work_radius = max(1, radius // 4)
                 work_safe_radius = f"min({work_radius}\\,min(w\\,h)/2-1)"
+                work_safe_chroma_radius = "max(0\\,min(10\\,min(w\\,h)/4-1))"
                 mask_resize = f"scale=w={work_width}:h={work_height}:flags=bilinear"
                 restore_size = f"scale=w={crop_width}:h={crop_height}:flags=bilinear"
                 filters.append(
@@ -2434,7 +2508,7 @@ def _blur_filter_graph_whiteboard(
                     f"scale=w={work_width}:h={work_height}:flags=bilinear,"
                     f"split=2[{original}][{to_blur}];"
                     f"[{to_blur}]boxblur=luma_radius={work_safe_radius}:luma_power=2:"
-                    f"chroma_radius=0:chroma_power=0:enable='{enable}'[{blurred}]"
+                    f"chroma_radius={work_safe_chroma_radius}:chroma_power=2:enable='{enable}'[{blurred}]"
                 )
                 # Bound the synthetic mask to the source interval.  An
                 # unbounded color source can keep maskedmerge producing
@@ -2455,7 +2529,7 @@ def _blur_filter_graph_whiteboard(
                     f"[{roi}]crop=w=iw*{w}:h=ih*{h}:x=iw*{x}:y=ih*{y},"
                     f"split=2[{original}][{to_blur}];"
                     f"[{to_blur}]boxblur=luma_radius={safe_radius}:luma_power=2:"
-                    f"chroma_radius=0:chroma_power=0:enable='{enable}'[{blurred}]"
+                    f"chroma_radius={safe_chroma_radius}:chroma_power=2:enable='{enable}'[{blurred}]"
                 )
                 mask_duration = max(float(item.get("end", 0.0)), 0.01)
                 filters.append(
@@ -2483,7 +2557,7 @@ def _blur_filter_graph_whiteboard(
             # Small face crops can reject the default chroma radius. Luma
             # blur is sufficient to destroy facial detail and works for both
             # the full participant rail and small detected face boxes.
-            f"boxblur=luma_radius={safe_radius}:luma_power=2:chroma_radius=0:chroma_power=0:enable='{enable}'{alpha}[{blurred}]"
+            f"boxblur=luma_radius={safe_radius}:luma_power=2:chroma_radius={safe_chroma_radius}:chroma_power=2:enable='{enable}'{alpha}[{blurred}]"
         )
         filters.append(
             f"[{base}][{overlay_blurred}]overlay=x=main_w*{x}:y=main_h*{y}:enable='{enable}'[{next_label}]"
@@ -2504,44 +2578,66 @@ def render(video: Path, manifest: dict[str, Any], output: Path) -> dict[str, Any
         pass
     visual = manifest.get("visual_redactions", [])
     audio = manifest.get("audio_redactions", [])
+    stored_strength = manifest.get("privacy", {}).get("blur_strength")
     stored_radius = manifest.get("privacy", {}).get("blur_radius")
     stored_opacity = manifest.get("privacy", {}).get("blur_opacity")
     stored_face_padding = manifest.get("privacy", {}).get("face_padding")
-    blur_radius = configured_blur_radius()
-    blur_opacity = configured_blur_opacity()
+    blur_strength = configured_blur_strength()
+    blur_radius = blur_radius_for_strength(blur_strength)
+    blur_opacity = 1.0
+    legacy_controls = False
+    if "PRIV_SANITIZER_BLUR_STRENGTH" not in os.environ and stored_strength is not None:
+        try:
+            blur_strength = max(0.0, min(1.0, float(stored_strength)))
+            blur_radius = blur_radius_for_strength(blur_strength)
+        except (TypeError, ValueError):
+            blur_strength = configured_blur_strength()
+            blur_radius = blur_radius_for_strength(blur_strength)
+    elif "PRIV_SANITIZER_BLUR_STRENGTH" not in os.environ and stored_strength is None and (
+        stored_radius is not None or stored_opacity is not None
+    ):
+        # Manifests written before --blur-strength carried independent radius
+        # and opacity fields. Preserve their exact render behavior.
+        legacy_controls = True
+    if legacy_controls:
+        if "PRIV_SANITIZER_BLUR_RADIUS" not in os.environ and stored_radius is not None:
+            try:
+                blur_radius = max(1, min(128, int(stored_radius)))
+            except (TypeError, ValueError):
+                blur_radius = configured_blur_radius()
+        if "PRIV_SANITIZER_BLUR_OPACITY" not in os.environ and stored_opacity is not None:
+            try:
+                blur_opacity = max(0.0, min(1.0, float(stored_opacity)))
+            except (TypeError, ValueError):
+                blur_opacity = configured_blur_opacity()
     face_padding = configured_face_padding()
-    if "PRIV_SANITIZER_BLUR_RADIUS" not in os.environ and stored_radius is not None:
-        try:
-            blur_radius = max(1, min(128, int(stored_radius)))
-        except (TypeError, ValueError):
-            blur_radius = configured_blur_radius()
-    if "PRIV_SANITIZER_BLUR_OPACITY" not in os.environ and stored_opacity is not None:
-        try:
-            blur_opacity = max(0.0, min(1.0, float(stored_opacity)))
-        except (TypeError, ValueError):
-            blur_opacity = configured_blur_opacity()
     if "PRIV_SANITIZER_FACE_PADDING" not in os.environ and stored_face_padding is not None:
         try:
             face_padding = max(0.0, min(0.5, float(stored_face_padding)))
         except (TypeError, ValueError):
             face_padding = configured_face_padding()
     settings = effective_privacy_settings()
+    if not legacy_controls:
+        blur_strength = settings["blur_strength"] if (
+            "PRIV_SANITIZER_BLUR_STRENGTH" in os.environ or stored_strength is None
+        ) else blur_strength
+        blur_radius = blur_radius_for_strength(blur_strength)
+        blur_opacity = 1.0
     if not whiteboard_mode_enabled():
-        # Preserve the stable meeting renderer's original blur settings unless
-        # the experimental whiteboard path is explicitly selected.
-        blur_radius = settings["blur_radius"]
-        blur_opacity = settings["blur_opacity"]
         face_padding = settings["face_padding"]
     args = [_tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(video)]
     if visual:
+        graph_kwargs: dict[str, Any] = {}
         if whiteboard_mode_enabled():
-            graph, output_label = _blur_filter_graph(
-                visual, blur_radius=blur_radius, blur_opacity=blur_opacity,
+            graph_kwargs.update(
                 frame_width=int(manifest.get("video", {}).get("width") or 0) or None,
                 frame_height=int(manifest.get("video", {}).get("height") or 0) or None,
             )
+        if legacy_controls:
+            graph_kwargs.update(blur_radius=blur_radius, blur_opacity=blur_opacity)
         else:
-            graph, output_label = _blur_filter_graph(visual)
+            graph_kwargs["blur_strength"] = blur_strength
+        graph, output_label = _blur_filter_graph(visual, **graph_kwargs)
         args += ["-filter_complex", graph, "-map", output_label]
     else:
         args += ["-map", "0:v:0"]
@@ -2585,6 +2681,9 @@ def render(video: Path, manifest: dict[str, Any], output: Path) -> dict[str, Any
         "visual_filters": len(visual),
         "audio_filters": len(audio_filters),
         "audio_mode": manifest.get("audio_mode"),
+        "blur_strength": blur_strength if not legacy_controls else round(
+            blur_radius / BLUR_STRENGTH_MAX_RADIUS, 6
+        ),
         "blur_radius": blur_radius,
         "blur_opacity": blur_opacity,
         "face_padding": face_padding,

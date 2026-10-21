@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 
 from priv_sanitizer import pipeline
-from priv_sanitizer.cli import _blur_opacity, build_parser
+from priv_sanitizer.cli import _blur_strength, build_parser
 
 
 def test_no_args_defaults_to_batch_in_current_directory(tmp_path, monkeypatch):
@@ -20,9 +20,9 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["-k"]).keep_artifacts is True
     assert build_parser().parse_args(["batch", "--keep-artifacts"]).keep_artifacts is True
     assert build_parser().parse_args(["batch", "--keep-videos"]).keep_artifacts is True
-    assert build_parser().parse_args(["--blur-radius", "48"]).blur_radius == 48
-    assert build_parser().parse_args(["--blur-opacity", "0.75"]).blur_opacity == 0.75
-    assert build_parser().parse_args(["batch", "--blur-opacity", "75%"]).blur_opacity == 0.75
+    assert build_parser().parse_args(["-b", "48%"]).blur_strength == 0.48
+    assert build_parser().parse_args(["--blur-strength", "0.75"]).blur_strength == 0.75
+    assert build_parser().parse_args(["batch", "--blur-strength", "75%"]).blur_strength == 0.75
     assert build_parser().parse_args(["--face-padding", "20%"]).face_padding == 0.20
     assert build_parser().parse_args(["batch", "--face-padding", "0.12"]).face_padding == 0.12
     assert build_parser().parse_args(["--aggressive"]).aggressive is True
@@ -32,10 +32,43 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args([]).whiteboard is False
 
 
-def test_blur_opacity_rejects_values_outside_range():
+def test_batch_options_are_available_in_no_argument_mode(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    args = build_parser().parse_args([
+        "--input", str(tmp_path),
+        "--output", "deliveries",
+        "--artifacts", "audit",
+        "--experimental-audio",
+        "--every", "2",
+    ])
+    assert args.command == "batch"
+    assert args.input == tmp_path
+    assert args.output == Path("deliveries")
+    assert args.artifacts == Path("audit")
+    assert args.experimental_audio is True
+    assert args.every == 2.0
+
+
+def test_subcommand_arguments_have_help_text():
+    parser = build_parser()
+    for command, required_fragments in {
+        "batch": ("--input", "--artifacts", "--every"),
+        "inspect": ("--job",),
+        "analyze": ("--audio-mode", "--every"),
+        "sanitize": ("--video", "--output", "--audio-mode"),
+        "harden": ("--transcript", "--job", "--transcript-offset"),
+        "render": ("--output",),
+        "verify": ("--output",),
+    }.items():
+        subparser = next(action for action in parser._actions if action.dest == "command").choices[command]
+        help_text = subparser.format_help()
+        assert all(fragment in help_text for fragment in required_fragments), command
+
+
+def test_blur_strength_rejects_values_outside_range():
     for value in ("-0.1", "1.1", "101%", "not-a-number"):
         try:
-            _blur_opacity(value)
+            _blur_strength(value)
         except Exception:
             pass
         else:
