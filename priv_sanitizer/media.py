@@ -10,9 +10,9 @@ import shlex
 import shutil
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 class ToolError(RuntimeError):
@@ -25,6 +25,7 @@ _PROGRESS_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _PROGRESS_COMPLETE = "⠿"  # Braille dots 1-6: a complete six-dot block.
 _PROGRESS_SPINNER_INDEX = 0
 _PROGRESS_SPINNER_INTERVAL = 0.25
+_PROGRESS_STAGE_TIMINGS: dict[str, tuple[float, float, str | None]] = {}
 
 
 def _tool(name: str) -> str:
@@ -104,23 +105,55 @@ def _heartbeat_seconds() -> float:
         return 15.0
 
 
-def _progress_status(stage: str, percent: int, *, final: bool = False) -> None:
+def _progress_status(stage: str, percent: float, *, final: bool = False) -> None:
     global _PROGRESS_SPINNER_INDEX
     if os.environ.get("PRIV_SANITIZER_QUIET") == "1":
         return
+    percent = max(0.0, min(100.0, float(percent)))
+    now = time.perf_counter()
+    eta: str | None = None
+    if final:
+        _PROGRESS_STAGE_TIMINGS.pop(stage, None)
+    else:
+        timing = _PROGRESS_STAGE_TIMINGS.get(stage)
+        if timing is None or percent < timing[1]:
+            timing = (now, percent, None)
+        elif percent > timing[1]:
+            elapsed = now - timing[0]
+            eta_seconds = max(0.0, elapsed * (100 - percent) / percent) if percent > 0 else 0.0
+            timing = (timing[0], percent, _format_eta(eta_seconds) if percent > 0 else None)
+        else:
+            # Spinner heartbeats must not make a stable percentage's ETA drift.
+            # Reuse the last estimate until FFmpeg reports forward progress.
+            timing = (timing[0], timing[1], timing[2])
+        _PROGRESS_STAGE_TIMINGS[stage] = timing
+        eta = timing[2]
     if final:
         spinner = _PROGRESS_COMPLETE
     else:
         spinner = _PROGRESS_SPINNER[_PROGRESS_SPINNER_INDEX % len(_PROGRESS_SPINNER)]
         _PROGRESS_SPINNER_INDEX += 1
-    message = f"[priv-sanitizer] {stage}: {spinner} {percent:3d}%"
-    _verbose_log(f"progress: {stage}: {percent:3d}%")
+    eta_suffix = f" ETA {eta}" if eta is not None else ""
+    message = f"[priv-sanitizer] {stage}: {spinner} {percent:6.2f}%{eta_suffix}"
+    _verbose_log(f"progress: {stage}: {percent:6.2f}%")
     stream = os.sys.stderr
     if stream.isatty():
         suffix = "\033[K\n" if final else "\033[K"
         print(f"\r{message}{suffix}", file=stream, end="", flush=True)
     else:
         print(message, file=stream, flush=True)
+
+
+def _format_eta(seconds: float) -> str:
+    """Format a rough progress ETA without overwhelming short stages."""
+    rounded = max(0, int(round(seconds)))
+    if rounded < 60:
+        return f"{rounded}s"
+    minutes, remaining = divmod(rounded, 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
@@ -159,7 +192,7 @@ def run(
             )
         except OSError as exc:
             raise ToolError(str(exc)) from exc
-        last_percent = -1
+        last_percent = -1.0
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         assert process.stdout is not None
@@ -190,9 +223,14 @@ def run(
                             _progress_status(progress_stage, last_percent)
                             last_status_at = now
                         if now - last_heartbeat_log_at >= heartbeat:
+                            last_reported = (
+                                f"{last_percent:.2f}%"
+                                if last_percent >= 0 else "none"
+                            )
                             _verbose(
                                 f"{progress_stage} still running after {elapsed:.0f}s "
-                                f"(no FFmpeg progress for {quiet_for:.0f}s; last reported {last_percent if last_percent >= 0 else 'none'}%)"
+                                f"(no FFmpeg progress for {quiet_for:.0f}s; "
+                                f"last reported {last_reported})"
                             )
                             last_heartbeat_log_at = now
                     continue
@@ -211,7 +249,11 @@ def run(
                     match = re.match(r"out_time_ms=(\d+)", line)
                     if match and duration and duration > 0:
                         last_progress_at = time.perf_counter()
-                        percent = min(99, int((int(match.group(1)) / 1_000_000) / duration * 100))
+                        raw_percent = (int(match.group(1)) / 1_000_000) / duration * 100
+                        # Keep two decimal places so long renders visibly move
+                        # between whole-percent milestones, while suppressing
+                        # excess redraws from FFmpeg's finer-grained updates.
+                        percent = min(99.99, round(max(0.0, raw_percent), 2))
                         if percent != last_percent:
                             _progress_status(progress_stage, percent)
                             last_percent = percent
@@ -336,17 +378,21 @@ def adaptive_sampling_interval(every: float, duration: float | None) -> float:
 
 
 def dense_face_sampling_enabled() -> bool:
-    if not whiteboard_mode_enabled():
-        return False
+    # Dense face coverage is required for ordinary meeting layouts too: a
+    # four-second sample can miss a full-screen camera/avatar interval even
+    # when the surrounding layout is unchanged.  The whiteboard opt-in still
+    # selects its separate localized/feathered detector; this switch only
+    # controls whether the shared low-resolution trigger stream is collected.
     configured = os.environ.get("PRIV_SANITIZER_DENSE_FACE_SAMPLING", "1").lower()
     return configured not in {"0", "false", "no", "off"}
 
 
 def dense_face_sampling_fps() -> float:
     try:
-        return max(0.5, min(8.0, float(os.environ.get("PRIV_SANITIZER_DENSE_FACE_FPS", "4"))))
+        default = "4" if whiteboard_mode_enabled() else "2"
+        return max(0.5, min(8.0, float(os.environ.get("PRIV_SANITIZER_DENSE_FACE_FPS", default))))
     except ValueError:
-        return 4.0
+        return 4.0 if whiteboard_mode_enabled() else 2.0
 
 
 def dense_face_diff_threshold() -> float:
@@ -470,7 +516,8 @@ def sample_dense_face_frames(
 ) -> list[Path]:
     """Extract frame-difference-triggered frames for layout-independent faces.
 
-    The source is sampled at the configured face FPS (4 by default), but only
+    The source is sampled at the configured face FPS (2 by default for normal
+    meetings, 4 for whiteboard mode), but only
     frames whose low-resolution FFmpeg scene metric changes, plus a bounded
     periodic fallback, are written. This gives motion-sensitive coverage
     without running Haar cascades on every source frame.
@@ -891,7 +938,16 @@ def _merge_regions(regions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         previous = merged[-1]
         same_box = _region_key(previous.get("box", [])) == _region_key(region.get("box", []))
         same_kind = previous.get("kind") == region.get("kind")
-        merge_gap = 4.25 if region.get("kind") == "participant_fullscreen" else 0.25
+        # A fullscreen mask is allowed a small detector heartbeat gap, but a
+        # multi-second gap usually means Meet switched to a different scene
+        # (for example a table view or a shared slide).  The old 4.25-second
+        # tolerance joined unrelated fullscreen detections into one blanket
+        # mask and could hide shared content between two participants.
+        # Dense 2-fps Haar can miss a transition frame or two.  A bounded
+        # 1.5-second heartbeat closes that privacy gap, while staying far
+        # below the historical 4.25-second bridge that swallowed unrelated
+        # shared-content scenes.
+        merge_gap = 1.5 if region.get("kind") == "participant_fullscreen" else 0.25
         touches = float(region.get("start", 0.0)) <= float(previous.get("end", 0.0)) + merge_gap
         if same_box and same_kind and touches:
             previous["end"] = max(float(previous.get("end", 0.0)), float(region.get("end", 0.0)))
@@ -1377,10 +1433,53 @@ def _face_observation_groups(
     return [group for group in groups if group[1] > group[0]]
 
 
+def _non_panel_intervals(
+    start: float, end: float, layout_regions: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
+    """Split a detector interval around participant-panel layout periods.
+
+    Face sampling intentionally continues through layout transitions.  A
+    detection made just before a shared-screen participant rail appears can
+    otherwise be extended into the rail by the temporal safety envelope.  The
+    rail itself is already protected by its enclosing panel region, so only
+    the portions outside active panels should be emitted by the fullscreen or
+    local face detector.
+    """
+    if end <= start:
+        return []
+    boundaries = {float(start), float(end)}
+    for region in layout_regions:
+        if region.get("kind") != "participant_panel":
+            continue
+        panel_start = max(float(start), float(region.get("start", 0.0)))
+        panel_end = min(float(end), float(region.get("end", end)))
+        if panel_end > panel_start:
+            boundaries.update((panel_start, panel_end))
+    ordered = sorted(boundaries)
+    intervals: list[tuple[float, float]] = []
+    for left, right in zip(ordered, ordered[1:]):
+        if right - left <= 1e-6:
+            continue
+        midpoint = (left + right) / 2.0
+        if not _active_layout_boxes(layout_regions, midpoint):
+            intervals.append((round(left, 3), round(right, 3)))
+    return intervals
+
+
 def _detect_face_regions_legacy(
     frame_paths: Iterable[Path], layout_regions: list[dict[str, Any]], duration: float,
+    face_frame_paths: Iterable[Path] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
-    """Stable meeting detector retained for the default non-whiteboard path."""
+    """Detect faces for ordinary Meet recordings without assuming one layout.
+
+    The normal path used to turn each large Haar proposal directly into a
+    fullscreen mask.  That made one false proposal bridge unrelated scenes,
+    while several small same-frame faces could remain as separate gaps.  Raw
+    observations are now tracked first: repeated large faces get a fullscreen
+    interval, repeated small faces stay local, and a scene with several
+    independent faces receives a bounded fullscreen interval.  Participant
+    rails remain handled by the enclosing layout region.
+    """
     capability = detector_capabilities()["face"]
     evidence: dict[str, Any] = {
         "backend": capability.get("backend"),
@@ -1405,58 +1504,279 @@ def _detect_face_regions_legacy(
         evidence["reason"] = reason
         warnings.append(f"face detection unavailable: {reason}; participant panel fallback remains active")
         return [], evidence, warnings
-    cascade = cv2.CascadeClassifier(str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"))
-    if cascade.empty():
-        warnings.append("OpenCV Haar face cascade could not be loaded")
-        evidence["available"] = False
-        return [], evidence, warnings
     found: dict[tuple[int, ...], dict[str, Any]] = {}
-    for frame, timestamp, segment_start, segment_end in _sample_entries(frame_paths, duration):
+    observations: list[dict[str, Any]] = []
+    layout_transition_windows: list[tuple[float, float]] = []
+    dense_frames = list(face_frame_paths or [])
+    scan_frames = dense_frames or list(frame_paths)
+    loaded_cascades: dict[str, tuple[Any, bool, int]] = {}
+    for frame, timestamp, segment_start, segment_end in _sample_entries(scan_frames, duration):
         image = cv2.imread(str(frame))
         if image is None:
             continue
         ih, iw = image.shape[:2]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         panels = _active_layout_boxes(layout_regions, timestamp)
-        scan_boxes = panels or [(0.0, 0.0, 1.0, 1.0)]
+        # The participant rail is already an enclosing blur region.  Keep
+        # skipping stable rail samples, but inspect a short window at each
+        # rail boundary: Meet can report the rail layout one dense sample
+        # before the fullscreen camera has actually disappeared.
+        panel_transition = bool(
+            dense_frames and panels and any(
+                abs(timestamp - float(region.get("start", 0.0))) <= 1.0
+                for region in layout_regions
+                if region.get("kind") == "participant_panel"
+            )
+        )
+        if dense_frames and panels and not panel_transition:
+            continue
+        scan_boxes = (
+            [(0.0, 0.0, 1.0, 1.0)]
+            if panel_transition else panels or [(0.0, 0.0, 1.0, 1.0)]
+        )
         for px, py, pw, ph in scan_boxes:
             x0, y0, x1, y1 = int(px * iw), int(py * ih), int((px + pw) * iw), int((py + ph) * ih)
             roi = gray[y0:y1, x0:x1]
-            faces = cascade.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
-            for x, y, w, h in faces:
-                pad_x, pad_y = int(w * 0.18), int(h * 0.22)
-                bx, by = max(0, x0 + x - pad_x), max(0, y0 + y - pad_y)
-                bw, bh = min(iw - bx, w + 2 * pad_x), min(ih - by, h + 2 * pad_y)
-                box = (round(bx / iw, 6), round(by / ih, 6), round(bw / iw, 6), round(bh / ih, 6))
-                fullscreen = not panels and (
-                    box[2] >= 0.16 or box[3] >= 0.24 or box[2] * box[3] >= 0.045
-                )
+            panel = bool(panels) and not panel_transition
+            for detector_name, cascade_path, mirrored, neighbors in _face_cascade_specs(cv2, panel=panel):
+                if detector_name not in loaded_cascades:
+                    try:
+                        cascade = cv2.CascadeClassifier(str(cascade_path))
+                    except Exception as exc:
+                        _verbose(f"face cascade {detector_name} failed to load: {exc}")
+                        continue
+                    if cascade.empty():
+                        continue
+                    loaded_cascades[detector_name] = (cascade, mirrored, neighbors)
+                cascade, mirrored, neighbors = loaded_cascades[detector_name]
+                variants: list[Any] = [roi]
+                if detector_name.startswith("profile") and hasattr(cv2, "equalizeHist"):
+                    variants.append(cv2.equalizeHist(roi))
+                for variant in variants:
+                    if mirrored:
+                        if not hasattr(cv2, "flip"):
+                            continue
+                        variant = cv2.flip(variant, 1)
+                    try:
+                        faces = cascade.detectMultiScale(
+                            variant, scaleFactor=1.1, minNeighbors=neighbors,
+                            minSize=(24, 24),
+                        )
+                    except Exception as exc:
+                        _verbose(f"face cascade {detector_name} failed on {frame.name}: {exc}")
+                        continue
+                    for x, y, w, h in faces:
+                        raw_width = float(w) / max(iw, 1)
+                        raw_height = float(h) / max(ih, 1)
+                        # Profile Haar is valuable for side-facing speakers,
+                        # but on meeting-room imagery it can lock onto a
+                        # torso/window contour. Reject only implausibly large
+                        # profile proposals; frontal full-screen presenters
+                        # remain eligible below.
+                        if detector_name.startswith("profile") and (
+                            raw_width >= 0.15 or raw_height >= 0.25
+                        ):
+                            continue
+                        if mirrored:
+                            x = variant.shape[1] - int(x) - int(w)
+                        pad_x, pad_y = int(w * 0.18), int(h * 0.22)
+                        bx, by = max(0, x0 + x - pad_x), max(0, y0 + y - pad_y)
+                        bw, bh = min(iw - bx, w + 2 * pad_x), min(ih - by, h + 2 * pad_y)
+                        box = (round(bx / iw, 6), round(by / ih, 6), round(bw / iw, 6), round(bh / ih, 6))
+                        if panels and not panel_transition:
+                            render_box, kind = box, "participant_face"
+                            source = f"opencv-haar-{detector_name}"
+                            duplicate = next(
+                                (
+                                    existing for existing in found.values()
+                                    if existing.get("start") == segment_start
+                                    and existing.get("kind") == kind
+                                    and _face_iou(tuple(existing.get("box", [])), render_box) >= 0.55
+                                ),
+                                None,
+                            )
+                            if duplicate is not None:
+                                duplicate["sources"] = list(dict.fromkeys([*duplicate.get("sources", []), source]))
+                                continue
+                            key = tuple(round(value * 10000) for value in render_box) + (round(segment_start * 100),)
+                            found[key] = {
+                                "id": f"face-{len(found):04d}",
+                                "start": segment_start,
+                                "end": segment_end,
+                                "kind": kind,
+                                "mode": "blur",
+                                "box": list(render_box),
+                                "confidence": 0.70,
+                                "sources": [source, "participant-panel-layout"],
+                                "review_required": True,
+                            }
+                            continue
+                        observations.append({
+                            "timestamp": timestamp,
+                            "segment_start": segment_start,
+                            "segment_end": segment_end,
+                            "box": box,
+                            "panel": False,
+                            "detector": detector_name,
+                            "luma": float(gray.mean()) if hasattr(gray, "mean") else None,
+                            "raw_width": raw_width,
+                            "raw_height": raw_height,
+                            "raw_y": float(y0 + y) / max(ih, 1),
+                        })
+                        if panel_transition and (
+                            raw_width >= 0.12 or raw_height >= 0.20
+                            or raw_width * raw_height >= 0.03
+                        ):
+                            # A large face outside the rail during its layout
+                            # boundary is still the fullscreen participant.
+                            # Preserve a short full-view safety window instead
+                            # of trusting the coarse panel start timestamp.
+                            layout_transition_windows.append((
+                                max(0.0, segment_start - 0.25),
+                                min(duration, segment_end + 0.25),
+                            ))
+
+    # Remove duplicate cascade proposals for the same face at one timestamp,
+    # but retain distinct people even when their boxes are nearby.
+    by_timestamp: dict[float, list[dict[str, Any]]] = {}
+    for observation in observations:
+        by_timestamp.setdefault(round(float(observation["timestamp"]), 3), []).append(observation)
+    unique_observations: list[dict[str, Any]] = []
+    for timestamp in sorted(by_timestamp):
+        for observation in sorted(
+            by_timestamp[timestamp],
+            key=lambda item: float(item.get("raw_width", 0.0)) * float(item.get("raw_height", 0.0)),
+            reverse=True,
+        ):
+            duplicate = next(
+                (
+                    existing for existing in unique_observations
+                    if round(float(existing["timestamp"]), 3) == timestamp
+                    and _face_iou(tuple(existing["box"]), tuple(observation["box"])) >= 0.55
+                ),
+                None,
+            )
+            if duplicate is None:
+                unique_observations.append(observation)
+            else:
+                duplicate["detector"] = f"{duplicate['detector']},{observation['detector']}"
+
+    tracks = _face_tracks(unique_observations)
+    multi_face_windows: list[tuple[float, float]] = []
+    multi_face_timestamps = [
+        timestamp for timestamp, items in sorted(by_timestamp.items())
+        if sum(
+            1 for item in unique_observations
+            if round(float(item["timestamp"]), 3) == timestamp
+        ) >= 2
+    ]
+    # Two or more independently detected faces on multiple samples are strong
+    # evidence of a participant-only meeting scene. Protect the complete view
+    # so a missed third face/nameplate cannot leak between local boxes.
+    if len(multi_face_timestamps) >= 2:
+        for timestamp in multi_face_timestamps:
+            items = [
+                item for item in unique_observations
+                if round(float(item["timestamp"]), 3) == timestamp
+            ]
+            start = min(float(item["segment_start"]) for item in items)
+            end = max(float(item["segment_end"]) for item in items)
+            # Dense 2-fps entries already span the midpoint to the next
+            # retained sample.  A quarter-second margin closes decode/scene
+            # boundaries without chaining unrelated avatar and camera scenes.
+            margin = 0.25 if dense_frames else 0.0
+            multi_face_windows.append((max(0.0, start - margin), min(duration, end + margin)))
+        merged_windows: list[tuple[float, float]] = []
+        for start, end in sorted(multi_face_windows):
+            if merged_windows and start <= merged_windows[-1][1] + 0.75:
+                merged_windows[-1] = (merged_windows[-1][0], max(merged_windows[-1][1], end))
+            else:
+                merged_windows.append((start, end))
+        multi_face_windows = merged_windows
+
+    def in_multi_window(start: float, end: float) -> bool:
+        return any(start < right and end > left for left, right in multi_face_windows)
+
+    for track in tracks:
+        support = len({round(float(item["timestamp"]), 3) for item in track})
+        detectors = {
+            name for item in track
+            for name in str(item.get("detector", "")).split(",") if name
+        }
+        sources = [f"opencv-haar-{name}" for name in sorted(detectors)]
+        sources.append("full-frame-layout")
+        max_width = max(float(item.get("raw_width", 0.0)) for item in track)
+        max_height = max(float(item.get("raw_height", 0.0)) for item in track)
+        large_face = max_width >= 0.16 or max_height >= 0.24 or max_width * max_height >= 0.045
+        # A single noisy Haar proposal is kept as a local mask, but a face
+        # that persists across dense samples can safely classify a fullscreen
+        # participant scene. This prevents table/avatar false positives from
+        # bridging into a later camera view.
+        fullscreen_track = support >= 2 and large_face
+        for start, end, box in _face_observation_groups(track, duration):
+            for clipped_start, clipped_end in _non_panel_intervals(start, end, layout_regions):
+                fullscreen = fullscreen_track or in_multi_window(clipped_start, clipped_end)
                 if fullscreen:
                     render_box, kind = (0.0, 0.0, 1.0, 1.0), "participant_fullscreen"
-                elif not panels:
-                    pad_x = max(box[2] * 1.25, 0.045)
-                    pad_y = max(box[3] * 1.50, 0.075)
+                else:
+                    # Profile cascades are useful for side-facing speakers but
+                    # their raw boxes are less stable; use a tighter envelope
+                    # so a small side profile does not expand into the torso.
+                    has_profile = any(name.startswith("profile") for name in detectors)
+                    pad_x_factor = 0.45 if has_profile else 1.25
+                    pad_y_factor = 0.65 if has_profile else 1.50
+                    pad_x = max(box[2] * pad_x_factor, 0.03 if has_profile else 0.045)
+                    pad_y = max(box[3] * pad_y_factor, 0.04 if has_profile else 0.075)
                     bx2, by2 = max(0.0, box[0] - pad_x), max(0.0, box[1] - pad_y)
                     ex, ey = min(1.0, box[0] + box[2] + pad_x), min(1.0, box[1] + box[3] + pad_y)
                     render_box, kind = (
                         round(bx2, 6), round(by2, 6), round(ex - bx2, 6), round(ey - by2, 6)
                     ), "participant_tile"
-                else:
-                    render_box, kind = box, "participant_face"
-                key = tuple(round(value * 10000) for value in render_box) + (round(segment_start * 100),)
+                key = tuple(round(value * 10000) for value in render_box) + (round(clipped_start * 100),)
                 found[key] = {
                     "id": f"face-{len(found):04d}",
-                    "start": segment_start,
-                    "end": segment_end,
+                    "start": clipped_start,
+                    "end": clipped_end,
                     "kind": kind,
                     "mode": "blur",
                     "box": list(render_box),
-                    "confidence": 0.70,
-                    "sources": ["opencv-haar", "participant-panel-layout" if panels else "full-frame-layout"],
+                    "confidence": round(min(0.95, 0.65 + 0.05 * min(support, 6)), 3),
+                    "sources": [*sources, "frame-diff-triggered"],
+                    "support_samples": support,
                     "review_required": True,
                 }
+
+    # Render transition overrides after local tracks so they are retained by
+    # coalescing even when the enclosing panel begins a fraction too early.
+    if layout_transition_windows:
+        merged_transition_windows: list[tuple[float, float]] = []
+        for start, end in sorted(layout_transition_windows):
+            if merged_transition_windows and start <= merged_transition_windows[-1][1] + 0.25:
+                merged_transition_windows[-1] = (
+                    merged_transition_windows[-1][0],
+                    max(merged_transition_windows[-1][1], end),
+                )
+            else:
+                merged_transition_windows.append((start, end))
+        for start, end in merged_transition_windows:
+            found[(0, 0, 10000, 10000, round(start * 100))] = {
+                "id": f"face-layout-transition-{len(found):04d}",
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "kind": "participant_fullscreen",
+                "mode": "blur",
+                "box": [0.0, 0.0, 1.0, 1.0],
+                "confidence": 0.86,
+                "sources": ["opencv-haar-layout-transition", "dense-face-frames"],
+                "review_required": True,
+            }
+
     results = _merge_regions(found.values())
     evidence["detections"] = len(results)
+    evidence["raw_detections"] = len(unique_observations)
+    evidence["stable_tracks"] = len(tracks)
+    evidence["multi_face_windows"] = len(multi_face_windows)
+    evidence["layout_transition_windows"] = len(layout_transition_windows)
     if not results:
         warnings.append("face detector ran but found no stable participant faces; avatars still rely on panel fallback")
     return results, evidence, warnings
@@ -1467,7 +1787,7 @@ def detect_face_regions(
     face_frame_paths: Iterable[Path] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     if not whiteboard_mode_enabled():
-        return _detect_face_regions_legacy(frame_paths, layout_regions, duration)
+        return _detect_face_regions_legacy(frame_paths, layout_regions, duration, face_frame_paths)
     return _detect_face_regions_whiteboard(frame_paths, layout_regions, duration, face_frame_paths)
 
 
@@ -1749,20 +2069,39 @@ def detect_visual_regions(
     frame_paths: Iterable[Path], duration: float, width: int, height: int,
     known_names: Iterable[str] = (),
     face_frame_paths: Iterable[Path] | None = None,
+    *, progress: Callable[[int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
     """Run layout, OCR, and face detectors and return auditable evidence."""
+    if progress is not None:
+        progress(0)
     frames = list(frame_paths)
+    dense_frames = list(face_frame_paths or [])
     layout, warnings, layout_evidence = detect_layout_regions(frames, duration, width, height)
+    if progress is not None:
+        progress(20)
     # Retain the established dark/UI fullscreen-presenter protection. This is
     # distinct from the removed unknown-layout fallback: bright physical
     # camera/whiteboard scenes do not enter this path.
     dark_fullscreen: list[dict[str, Any]] = []
-    for frame, timestamp, segment_start, segment_end in _sample_entries(frames, duration):
+    dark_entries = _sample_entries(frames, duration)
+    if dense_frames:
+        dark_entries.extend(_sample_entries(dense_frames, duration))
+    # The dense entry interval is already temporal coverage; keep only a
+    # small edge margin so separate dark avatar screens do not bridge several
+    # seconds of unrelated shared content.
+    dark_margin = 0.25 if dense_frames else 0.0
+    seen_dark_timestamps: set[float] = set()
+    for frame, timestamp, segment_start, segment_end in sorted(
+        dark_entries, key=lambda item: item[1]
+    ):
+        if timestamp in seen_dark_timestamps:
+            continue
+        seen_dark_timestamps.add(timestamp)
         if not _active_layout_boxes(layout, timestamp) and _mean_luma(frame) < 80:
             dark_fullscreen.append({
                 "id": f"layout-dark-fullscreen-{len(dark_fullscreen):04d}",
-                "start": segment_start,
-                "end": segment_end,
+                "start": max(0.0, segment_start - dark_margin),
+                "end": min(duration, segment_end + dark_margin),
                 "kind": "participant_fullscreen",
                 "mode": "blur",
                 "box": [0.0, 0.0, 1.0, 1.0],
@@ -1780,23 +2119,86 @@ def detect_visual_regions(
             frames,
             layout,
             duration,
-            face_frame_paths,
+            dense_frames or None,
         )
-        try:
-            ocr, ocr_evidence, ocr_warnings = ocr_future.result()
-        except Exception as exc:  # optional backend failures must not abort sanitization
-            ocr, ocr_evidence, ocr_warnings = [], {
-                "backend": "pytesseract", "available": False, "detections": 0,
-                "reason": f"backend error: {exc}",
-            }, [f"OCR backend error: {exc}; visible names remain review-required"]
-        try:
-            faces, face_evidence, face_warnings = face_future.result()
-        except Exception as exc:  # optional backend failures must not abort sanitization
-            faces, face_evidence, face_warnings = [], {
-                "backend": "opencv-haar", "available": False, "detections": 0,
-                "reason": f"backend error: {exc}",
-            }, [f"face backend error: {exc}; participant panel fallback remains active"]
-    candidates = [*layout, *dark_fullscreen, *ocr, *faces]
+        futures = {ocr_future: "ocr", face_future: "faces"}
+        completed: set[str] = set()
+
+        def collect(future: Any, detector: str) -> None:
+            try:
+                result = future.result()
+            except Exception as exc:  # optional backend failures must not abort sanitization
+                if detector == "ocr":
+                    result = ([], {
+                        "backend": "pytesseract", "available": False, "detections": 0,
+                        "reason": f"backend error: {exc}",
+                    }, [f"OCR backend error: {exc}; visible names remain review-required"])
+                else:
+                    result = ([], {
+                        "backend": "opencv-haar", "available": False, "detections": 0,
+                        "reason": f"backend error: {exc}",
+                    }, [f"face backend error: {exc}; participant panel fallback remains active"])
+            if detector == "ocr":
+                nonlocal_ocr[0], nonlocal_ocr[1], nonlocal_ocr[2] = result
+            else:
+                nonlocal_faces[0], nonlocal_faces[1], nonlocal_faces[2] = result
+            completed.add(detector)
+            if progress is not None:
+                # Layout accounts for the first 20%; OCR and face analysis
+                # each account for the next milestones. Whichever worker
+                # finishes first moves the stage to 60%; final coalescing and
+                # evidence assembly are reported as 100% below.
+                progress(60 if len(completed) == 1 else 90)
+
+        nonlocal_ocr: list[Any] = [[], {}, []]
+        nonlocal_faces: list[Any] = [[], {}, []]
+        if progress is None:
+            collect(ocr_future, "ocr")
+            collect(face_future, "faces")
+        else:
+            pending = set(futures)
+            poll_interval = 0.25 if os.sys.stderr.isatty() else min(_heartbeat_seconds(), 1.0)
+            while pending:
+                done, pending = wait(pending, timeout=poll_interval)
+                if not done:
+                    # Keep the percentage stable while advancing the spinner;
+                    # this is especially useful when Tesseract is slow.
+                    progress(20 + 40 * len(completed))
+                    continue
+                for future in done:
+                    collect(future, futures[future])
+        ocr, ocr_evidence, ocr_warnings = nonlocal_ocr
+        faces, face_evidence, face_warnings = nonlocal_faces
+    # Coarse layout timestamps are midpoints between 4-second samples and can
+    # precede the actual decoded switch by several frames.  If a fullscreen
+    # participant mask ends immediately before a participant rail begins,
+    # retain a short full-view transition bridge.  This closes the exact case
+    # where the first rail frame still contains the previous fullscreen face;
+    # the rail remains localized once the transition settles.
+    layout_transition_bridges: list[dict[str, Any]] = []
+    for panel in layout:
+        if panel.get("kind") != "participant_panel":
+            continue
+        panel_start = float(panel.get("start", 0.0))
+        preceding_fullscreen = [
+            region for region in [*dark_fullscreen, *faces]
+            if region.get("kind") == "participant_fullscreen"
+            and float(region.get("end", 0.0)) >= panel_start - 1.0
+        ]
+        if not preceding_fullscreen:
+            continue
+        layout_transition_bridges.append({
+            "id": f"layout-transition-bridge-{len(layout_transition_bridges):04d}",
+            "start": max(0.0, round(panel_start - 0.25, 3)),
+            "end": min(duration, round(panel_start + 0.75, 3)),
+            "kind": "participant_fullscreen",
+            "mode": "blur",
+            "box": [0.0, 0.0, 1.0, 1.0],
+            "confidence": 0.84,
+            "sources": ["layout-transition-safety"],
+            "review_required": True,
+        })
+    candidates = [*layout, *dark_fullscreen, *layout_transition_bridges, *ocr, *faces]
     # Keep participant-rail, established dark fullscreen-presenter, and local
     # face/name regions. Unknown bright/physical scenes without local evidence
     # remain review-required instead of receiving a blanket fallback blur.
@@ -1810,11 +2212,14 @@ def detect_visual_regions(
         "aggressive_redaction": aggressive_redaction_enabled(),
         "ocr": ocr_evidence,
         "face": face_evidence,
+        "layout_transition_bridges": len(layout_transition_bridges),
         "candidate_region_count": len(candidates),
         "render_region_count": len(regions),
         "ocr_regions": ocr,
         "face_regions": faces,
     }
+    if progress is not None:
+        progress(100)
     return regions, [*warnings, *ocr_warnings, *face_warnings], detectors
 
 
@@ -1834,9 +2239,9 @@ def _coalesce_render_regions(regions: Iterable[dict[str, Any]]) -> list[dict[str
                 and float(outer.get("end", 0.0)) >= float(region.get("end", 0.0)) - 0.25
             )
             encloses = (
-                outer_box[0] <= box[0] and outer_box[1] <= box[1]
-                and outer_box[0] + outer_box[2] >= box[0] + box[2]
-                and outer_box[1] + outer_box[3] >= box[1] + box[3]
+                outer_box[0] <= box[0] + 1e-4 and outer_box[1] <= box[1] + 1e-4
+                and outer_box[0] + outer_box[2] >= box[0] + box[2] - 1e-4
+                and outer_box[1] + outer_box[3] >= box[1] + box[3] - 1e-4
                 and (outer_box[2] * outer_box[3]) > (box[2] * box[3]) * 1.15
             )
             if same_window and encloses and outer.get("kind") in {

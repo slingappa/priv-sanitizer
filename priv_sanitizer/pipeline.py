@@ -13,6 +13,7 @@ from typing import Any
 
 from .media import (
     _status,
+    _progress_status,
     _coalesce_render_regions,
     adaptive_sampling_interval,
     aggressive_redaction_enabled,
@@ -148,10 +149,13 @@ def baseline(
     elif dense_faces_requested and not face_capability.get("available"):
         _status(f"dense face sampling skipped ({face_capability.get('reason') or 'face backend unavailable'})")
     stage_started = time.perf_counter()
-    _status("analysing layout, OCR, and faces")
+    analysis_stage = "analysing layout, OCR, and faces"
     visual, visual_warnings, detector_evidence = detect_visual_regions(
         frames, info["duration"], info["width"], info["height"],
         face_frame_paths=dense_face_frames or None,
+        progress=lambda percent: _progress_status(
+            analysis_stage, percent, final=percent >= 100
+        ),
     )
     _status(f"visual analysis complete: {len(visual)} regions in {time.perf_counter() - stage_started:.1f}s")
     if analyze_audio is None:
@@ -255,12 +259,16 @@ def harden(
     if frame_dir.exists():
         transcript_frames = sorted(frame_dir.glob("frame-*.jpg"))
         if transcript_frames:
+            transcript_stage = "analysing transcript layout, OCR, and faces"
             transcript_visual, transcript_visual_warnings, transcript_detectors = detect_visual_regions(
                 transcript_frames,
                 info["duration"],
                 info["width"],
                 info["height"],
                 known_names=transcript_data["names"],
+                progress=lambda percent: _progress_status(
+                    transcript_stage, percent, final=percent >= 100
+                ),
             )
     candidate_audio = hardening_intervals(
         transcript_data, info["duration"], time_offset=transcript_offset

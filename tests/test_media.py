@@ -15,12 +15,16 @@ from priv_sanitizer.media import (
     detect_visual_regions,
     _face_tracks,
     _face_observation_groups,
+    _merge_regions,
+    _non_panel_intervals,
+    _coalesce_render_regions,
     _localized_face_box,
     PHYSICAL_FACE_MIN_HEIGHT,
     PHYSICAL_FACE_MIN_WIDTH,
     PHYSICAL_FACE_MAX_HEIGHT,
     PHYSICAL_FACE_MAX_WIDTH,
     adaptive_sampling_interval,
+    dense_face_sampling_enabled,
     detect_face_regions,
     detect_layout_regions,
     detect_ocr_regions,
@@ -46,6 +50,12 @@ def test_adaptive_sampling_dense_for_short_clips(monkeypatch):
     assert adaptive_sampling_interval(4.0, 480.0) == 4.0
     monkeypatch.setenv("PRIV_SANITIZER_ADAPTIVE_SAMPLING", "0")
     assert adaptive_sampling_interval(4.0, 11.0) == 4.0
+
+
+def test_dense_face_sampling_is_enabled_for_normal_meetings(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    monkeypatch.delenv("PRIV_SANITIZER_DENSE_FACE_SAMPLING", raising=False)
+    assert dense_face_sampling_enabled() is True
 
 
 def test_effective_privacy_settings_are_stable_unless_whiteboard_is_opted_in(monkeypatch):
@@ -394,6 +404,64 @@ def test_face_backend_uses_dense_frames_for_layout_independent_scan(tmp_path):
     assert regions and regions[0]["kind"] == "participant_tile"
 
 
+def test_face_backend_keeps_fullscreen_safety_at_panel_boundary(tmp_path):
+    class FakeCascade:
+        def empty(self):
+            return False
+
+        def detectMultiScale(self, roi, **kwargs):
+            return [(20, 20, 36, 40)]
+
+    class FakeCV2:
+        __version__ = "test"
+        COLOR_BGR2GRAY = 0
+        data = SimpleNamespace(haarcascades="/tmp")
+
+        @staticmethod
+        def imread(path):
+            import numpy as np
+            return np.zeros((100, 100, 3), dtype=np.uint8)
+
+        @staticmethod
+        def cvtColor(image, code):
+            import numpy as np
+            return np.zeros(image.shape[:2], dtype=np.uint8)
+
+        @staticmethod
+        def CascadeClassifier(path):
+            return FakeCascade()
+
+        @staticmethod
+        def flip(image, axis):
+            return image
+
+    dense = tmp_path / "dense"
+    dense.mkdir()
+    for index in range(2):
+        (dense / f"frame-{index:06d}.jpg").touch()
+    (dense / "frame-timestamps.json").write_text(
+        '{"frame-000000.jpg": 5.0, "frame-000001.jpg": 5.5}\n',
+        encoding="utf-8",
+    )
+    layout = [{
+        "kind": "participant_panel", "box": [0.75, 0.0, 0.25, 1.0],
+        "start": 5.0, "end": 10.0,
+    }]
+    with patch.dict(os.environ, {"PRIV_SANITIZER_WHITEBOARD": "0"}), patch.dict(
+        sys.modules, {"cv2": FakeCV2()}
+    ):
+        regions, evidence, _ = detect_face_regions(
+            [], layout, 10.0, face_frame_paths=sorted(dense.glob("frame-*.jpg"))
+        )
+    assert evidence["layout_transition_windows"] >= 1
+    assert any(
+        item["kind"] == "participant_fullscreen"
+        and item["start"] < 5.0
+        and item["box"] == [0.0, 0.0, 1.0, 1.0]
+        for item in regions
+    )
+
+
 def test_moving_physical_face_stays_one_track_and_has_no_temporal_gap():
     common = {
         "panel": False,
@@ -545,11 +613,66 @@ def test_progress_status_shows_braille_spinner(monkeypatch):
     message = stderr.getvalue()
     lines = [line for line in message.splitlines() if line]
     assert len(lines) == 3
-    assert all("rendering video:" in line and "42%" in line for line in lines[:2])
+    assert all("rendering video:" in line and "42.00%" in line for line in lines[:2])
     symbols = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     assert all(any(symbol in line for symbol in symbols) for line in lines[:2])
     assert lines[0].split(": ", 1)[1][0] != lines[1].split(": ", 1)[1][0]
-    assert lines[2].endswith("⠿ 100%")
+    assert lines[2].endswith("⠿ 100.00%")
+
+
+def test_progress_status_shows_ballpark_eta(monkeypatch):
+    stderr = StringIO()
+    stage = "eta progress test"
+    monkeypatch.setenv("PRIV_SANITIZER_QUIET", "0")
+    monkeypatch.setenv("PRIV_SANITIZER_VERBOSE", "0")
+    with patch("priv_sanitizer.media.time.perf_counter", side_effect=[100.0, 110.0, 120.0]), redirect_stderr(stderr):
+        _progress_status(stage, 0)
+        _progress_status(stage, 50)
+        _progress_status(stage, 100, final=True)
+    lines = [line for line in stderr.getvalue().splitlines() if line]
+    assert "50.00% ETA 10s" in lines[1]
+    assert lines[2].endswith("⠿ 100.00%")
+
+
+def test_progress_eta_does_not_drift_on_spinner_heartbeat(monkeypatch):
+    stderr = StringIO()
+    stage = "stable progress test"
+    monkeypatch.setenv("PRIV_SANITIZER_QUIET", "0")
+    with patch("priv_sanitizer.media.time.perf_counter", side_effect=[100.0, 110.0, 210.0]), redirect_stderr(stderr):
+        _progress_status(stage, 0)
+        _progress_status(stage, 50)
+        _progress_status(stage, 50)
+    lines = [line for line in stderr.getvalue().splitlines() if line]
+    assert "50.00% ETA 10s" in lines[1]
+    assert "50.00% ETA 10s" in lines[2]
+
+
+def test_progress_status_keeps_fractional_percentage(monkeypatch):
+    stderr = StringIO()
+    monkeypatch.setenv("PRIV_SANITIZER_QUIET", "0")
+    with redirect_stderr(stderr):
+        _progress_status("rendering video", 35.05)
+    line = stderr.getvalue().strip()
+    assert line.endswith("35.05%")
+
+
+def test_visual_analysis_reports_progress_milestones():
+    progress = []
+    with patch(
+        "priv_sanitizer.media.detect_layout_regions",
+        return_value=([], [], {}),
+    ), patch(
+        "priv_sanitizer.media.detect_ocr_regions",
+        return_value=([], {}, []),
+    ), patch(
+        "priv_sanitizer.media.detect_face_regions",
+        return_value=([], {}, []),
+    ):
+        detect_visual_regions([], 1.0, 1920, 1080, progress=progress.append)
+    assert progress[0] == 0
+    assert progress[1] == 20
+    assert 60 in progress or 90 in progress
+    assert progress[-1] == 100
 
 
 def test_layout_detection_is_temporal_not_global(tmp_path):
@@ -570,3 +693,46 @@ def test_layout_detection_is_temporal_not_global(tmp_path):
     assert evidence["temporal_region_count"] == 1
     assert regions[0]["start"] == 2.0
     assert regions[0]["end"] == 8.0
+
+
+def test_fullscreen_regions_do_not_bridge_scene_gaps():
+    first = {
+        "kind": "participant_fullscreen", "box": [0.0, 0.0, 1.0, 1.0],
+        "start": 0.0, "end": 1.0, "confidence": 0.7,
+    }
+    second = {
+        "kind": "participant_fullscreen", "box": [0.0, 0.0, 1.0, 1.0],
+        "start": 4.0, "end": 5.0, "confidence": 0.7,
+    }
+    merged = _merge_regions([first, second])
+    assert len(merged) == 2
+
+
+def test_non_panel_intervals_clip_face_detection_at_rail_boundary():
+    layout = [{
+        "kind": "participant_panel", "box": [0.75, 0.0, 0.25, 1.0],
+        "start": 5.0, "end": 10.0,
+    }]
+    assert _non_panel_intervals(2.0, 12.0, layout) == [(2.0, 5.0), (10.0, 12.0)]
+
+
+def test_fullscreen_transition_bridge_survives_panel_coalescing():
+    regions = _coalesce_render_regions([
+        {
+            "kind": "participant_fullscreen", "box": [0.0, 0.0, 1.0, 1.0],
+            "start": 0.0, "end": 5.0,
+        },
+        {
+            "kind": "participant_fullscreen", "box": [0.0, 0.0, 1.0, 1.0],
+            "start": 4.75, "end": 5.75,
+            "sources": ["layout-transition-safety"],
+        },
+        {
+            "kind": "participant_panel", "box": [0.75, 0.0, 0.25, 1.0],
+            "start": 5.0, "end": 10.0,
+        },
+    ])
+    fullscreen = [item for item in regions if item["kind"] == "participant_fullscreen"]
+    panel = [item for item in regions if item["kind"] == "participant_panel"]
+    assert fullscreen and fullscreen[0]["end"] >= 5.75
+    assert panel and panel[0]["start"] == 5.0

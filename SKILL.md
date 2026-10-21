@@ -75,14 +75,14 @@ manifest once as a fallback. A transcript is never used as a reason to encode
 the full recording twice.
 
 The detector stack records per-segment layout-model evidence, OCR evidence
-(Tesseract when installed), and the stable OpenCV Haar evidence when installed.
-The normal meeting path is intentionally unchanged from the stable release.
-Use `-w`/`--whiteboard` to opt into the experimental physical-camera path. That
-mode adds low-resolution frame-difference face sampling, multi-cascade temporal
-tracking, denser short-clip sampling, and localized feathered masks for
-whiteboards and arbitrary camera layouts. `--balanced`, `--blur-radius`,
-`--blur-opacity`, and `--face-padding` tune that mode and have no effect on the
-stable default renderer without `-w`.
+(Tesseract when installed), and OpenCV Haar evidence when installed. Normal
+meeting mode now uses a 2-fps frame-difference-triggered face scan by default,
+multi-cascade temporal tracking, and bounded safety gaps for fullscreen
+single/multi-face scenes and static avatars. Use `-w`/`--whiteboard` to opt into
+the experimental physical-camera path; that mode uses a denser default scan
+and localized feathered masks for whiteboards and arbitrary camera layouts.
+`--balanced`, `--blur-radius`, `--blur-opacity`, and `--face-padding` tune that
+localized mode and have no effect on the stable normal renderer without `-w`.
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
 
@@ -101,7 +101,15 @@ those defaults through an integration.
 Diagnostics and periodic heartbeats are enabled by default and written to
 `verbose.log` in the caller's working directory; detailed command lines and
 heartbeats are log-only. `-v`/`--verbose` explicitly forces this mode, `PRIV_SANITIZER_VERBOSE=0` disables it, and
-`PRIV_SANITIZER_HEARTBEAT_SECONDS` controls the heartbeat interval.
+`PRIV_SANITIZER_HEARTBEAT_SECONDS` controls the heartbeat interval. Progress
+ETAs are ballpark estimates refreshed when the percentage advances; spinner
+heartbeats do not make a stable percentage's ETA drift.
+
+The renderer preserves source edits and single-frame scene cuts. A bright
+flash can remain visible in the delivery even when the entire frame is under
+an active blur region; review the source alongside the output and use the
+timestamped `visual_redactions` entries to distinguish an editorial flash from
+a missed mask. Removing the flash itself is outside privacy masking.
 
 For staged work, read [references/workflow.md](references/workflow.md). For privacy decisions, read [references/policy.md](references/policy.md).
 

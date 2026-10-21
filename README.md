@@ -16,9 +16,11 @@ by default.
 - Works with a video alone; a transcript is optional secondary evidence.
 - Detects changing meeting layouts, including participant rails, grids, and
   full-screen speakers or avatars.
-- Uses the stable meeting detector by default. Established dark/UI full-screen
-  presenter views keep their full-frame protection. The newer physical-camera
-  and whiteboard detector is experimental and is enabled only with `-w`.
+- Uses dense, frame-difference-triggered face sampling by default for ordinary
+  meetings, including fullscreen single/multi-face views and static UI/avatar
+  screens when layout evidence is available.
+  The newer localized physical-camera and whiteboard detector is experimental
+  and is enabled only with `-w`.
 - Blurs participant images and visible names instead of replacing them with a
   solid fill.
 - Preserves audio by default. Experimental transcript-guided name muting is
@@ -221,17 +223,20 @@ cd "$VIDEO_DIR"
    transitions.
 3. Available OCR, face, and temporal meeting-layout evidence is combined into
    time-bounded blur regions.
-4. With `-w`, an additional frame-difference face scan, multi-cascade tracking,
-   and localized feathered masks handle physical-camera/whiteboard scenes.
+4. Dense normal-mode face observations are temporally tracked and grouped so
+   missed transition frames, fullscreen multi-face scenes, and static avatars
+   remain covered. With `-w`, the same evidence feeds localized feathered
+   physical-face masks for physical-camera/whiteboard scenes.
 5. FFmpeg renders regional blur while preserving shared content where the
    layout can be separated safely.
 6. Verification checks output duration and video/audio stream presence.
 
 If a layout cannot be separated confidently, the tool records unresolved
-coverage for manual review. The established meeting path retains its
-full-screen presenter protection; only `-w` enables the experimental localized
-whiteboard/camera path. Detector availability, warnings, evidence, effective
-mode, and review-required regions are recorded in `analysis.json` and
+coverage for manual review. Fullscreen participant-only scenes may be blurred
+as a complete view; participant rails remain localized so shared content is
+preserved. Only `-w` enables the experimental localized whiteboard/camera
+path. Detector availability, warnings, evidence, effective mode, and
+review-required regions are recorded in `analysis.json` and
 `redaction-manifest.json`.
 
 ## Review before sharing
@@ -254,6 +259,16 @@ Always inspect the output. If you used `-k`, also inspect these audit artifacts:
 
 Duration and stream checks confirm a usable output; they do not prove that
 every visual or spoken identifier was found.
+
+### Brief flashes and scene cuts
+
+The sanitizer masks source frames; it does not remove edits, camera cuts, or
+single-frame flashes that already exist in the recording. A bright frame can
+therefore remain visibly bright while its participant faces and names are
+blurred. Compare the source and delivery at the reported timestamp and check
+the corresponding `visual_redactions` interval in `redaction-manifest.json`.
+Removing the flash itself is a separate editorial operation, such as
+replacing or freezing the frame, and is outside privacy masking.
 
 ## Installation options
 
@@ -305,7 +320,8 @@ regular launcher continues to use native Python by default.
 - Live progress shows a rotating Braille spinner beside each percentage so a
   slow conversion visibly remains active. In a terminal it ticks about four
   times per second even when the percentage is unchanged; non-interactive logs
-  use the slower heartbeat cadence.
+  use the slower heartbeat cadence. The optional ETA is a ballpark estimate and
+  is refreshed when the reported percentage advances.
 - The Docker launchers preserve an interactive terminal for this animation and
   keep redirected or piped runs line-oriented.
 - `-v`/`--verbose` forces detailed diagnostics into that log.
@@ -320,12 +336,12 @@ regular launcher continues to use native Python by default.
   diagnostic comparison. Threshold and clustering are controlled by
   `PRIV_SANITIZER_SCENE_THRESHOLD` and
   `PRIV_SANITIZER_SCENE_MERGE_SECONDS`.
-- `-w` enables the experimental low-resolution face scan at up to 4 fps,
-  frame-difference triggers, multi-cascade tracking, denser short-clip layout
-  sampling, and localized physical-face masks. These are intentionally off in
-  the stable default path. `PRIV_SANITIZER_DENSE_FACE_FPS`,
+- Normal mode enables a low-resolution face scan at 2 fps by default, with
+  frame-difference triggers, multi-cascade tracking, and bounded temporal
+  safety gaps. `PRIV_SANITIZER_DENSE_FACE_FPS`,
   `PRIV_SANITIZER_FACE_DIFF_THRESHOLD`, and
-  `PRIV_SANITIZER_FACE_FALLBACK_SECONDS` tune that experimental mode only.
+  `PRIV_SANITIZER_FACE_FALLBACK_SECONDS` tune that scan. `-w` additionally
+  enables localized feathered physical-face masks and uses a 4-fps default.
 - `-k`/`--keep-artifacts` retains generated audit artifacts for debugging;
   `--keep-videos` is a compatibility alias. Omit it to remove artifacts after
   delivery verification and minimize storage use.
@@ -339,18 +355,22 @@ and completed stages use the six-dot `⠿` glyph.
 $ priv-sanitizer -j16
 [priv-sanitizer] batch 1/1: baseline example-meeting.mp4
 [priv-sanitizer] probing input
-[priv-sanitizer] sampling frames: ⠋ 100%
-[priv-sanitizer] detecting scene changes: ⠙ 100%
+[priv-sanitizer] sampling frames: ⠋ 100.00%
+[priv-sanitizer] detecting scene changes: ⠙ 100.00%
 [priv-sanitizer] sampling complete: 1444 frames in 79.4s
-[priv-sanitizer] analysing layout, OCR, and faces
+[priv-sanitizer] analysing layout, OCR, and faces: ⠹   0.00%
+[priv-sanitizer] analysing layout, OCR, and faces: ⠸  20.00%
+[priv-sanitizer] analysing layout, OCR, and faces: ⠼  60.00% ETA 18s
+[priv-sanitizer] analysing layout, OCR, and faces: ⠴  90.00% ETA 5s
+[priv-sanitizer] analysing layout, OCR, and faces: ⠿ 100.00%
 [priv-sanitizer] visual analysis complete: 6 regions in 29.5s
 [priv-sanitizer] audio analysis skipped (audio preserved; enable --experimental-audio or PRIV_SANITIZER_AUDIO_ANALYSIS=1 to enable)
 [priv-sanitizer] writing analysis manifest
 [priv-sanitizer] preparing render
 [priv-sanitizer] render settings: ffmpeg_threads=16, x264_preset=ultrafast
-[priv-sanitizer] rendering video: ⠴  78%
-[priv-sanitizer] rendering video: ⠦  79%
-[priv-sanitizer] rendering video: ⠿ 100%
+[priv-sanitizer] rendering video: ⠴  78.00% ETA 2m 10s
+[priv-sanitizer] rendering video: ⠦  79.00% ETA 2m 05s
+[priv-sanitizer] rendering video: ⠿ 100.00%
 ```
 
 Common setup errors:
