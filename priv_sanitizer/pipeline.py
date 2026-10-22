@@ -445,12 +445,18 @@ def _state_matches(
     artifacts_dir: Path,
     settings: dict[str, Any],
 ) -> bool:
+    stored_settings = state.get("settings")
+    # State files created before local staging was introduced did not carry
+    # that key. They are compatible with the current renderer; normalize the
+    # missing field so an interrupted older batch can still resume.
+    if isinstance(stored_settings, dict) and "local_staging" not in stored_settings:
+        stored_settings = {**stored_settings, "local_staging": settings.get("local_staging")}
     return (
         state.get("schema_version") == BATCH_STATE_SCHEMA_VERSION
         and state.get("input_dir") == str(input_dir)
         and state.get("output_dir") == str(output_dir)
         and state.get("artifacts_dir") == str(artifacts_dir)
-        and state.get("settings") == settings
+        and stored_settings == settings
         and isinstance(state.get("videos"), list)
     )
 

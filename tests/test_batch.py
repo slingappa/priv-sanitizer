@@ -311,6 +311,10 @@ def test_batch_persists_state_and_resumes_after_interrupt(tmp_path):
     assert interrupted["status"] == "running"
     assert [item["status"] for item in interrupted["videos"]] == ["completed", "running"]
     assert (tmp_path / "outputs_sanitized" / "first.mp4").exists()
+    # Older resumable states predate the local-staging setting; they must
+    # still migrate and resume rather than forcing a full restart.
+    interrupted["settings"].pop("local_staging", None)
+    state_path.write_text(json.dumps(interrupted), encoding="utf-8")
 
     calls.clear()
     with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
