@@ -63,7 +63,8 @@ copy-in and copy-out steps unless `-q` is used. Choose another scratch volume
 with `PRIV_SANITIZER_STAGE_DIR`.
 
 For SharePoint-mounted recordings, pass `--sharepoint-dir URL` with the local
-directory used to discover names. This implies local staging, downloads video
+directory used to discover names. Canonical folder URLs and `/:f:/r/...` sharing
+links are supported. This implies local staging, downloads video
 and optional transcript bytes directly through Microsoft Graph, and uploads
 completed deliveries to the remote `outputs_sanitized/` child folder while
 also keeping the local delivery copy. A delegated Graph token for

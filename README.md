@@ -79,7 +79,8 @@ priv-sanitizer batch \
   --output /path/to/local/outputs_sanitized
 ```
 
-`--sharepoint-dir` implies local staging. The input directory is used only to
+`--sharepoint-dir` accepts either a canonical folder URL or a SharePoint
+sharing-folder link (`/:f:/r/...?...`). It implies local staging. The input directory is used only to
 discover video/transcript names; each source is downloaded directly through
 Microsoft Graph, and completed deliveries are uploaded to the remote
 `outputs_sanitized/` child folder. The local delivery copy is retained too.
