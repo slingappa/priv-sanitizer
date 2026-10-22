@@ -64,8 +64,10 @@ priv-sanitizer --local-staging --input /path/to/recordings \
 
 Analysis and rendering then reread the local copy instead of continuously
 reading a network mount; only the source staging copy and final delivery cross
-the network. `PRIV_SANITIZER_LOCAL_STAGING=1` is the equivalent environment
-setting. Set `PRIV_SANITIZER_STAGE_DIR` when `/tmp` is not large enough.
+the network. Copy-in, retained-artifact, and final-delivery transfers show
+percentage and ETA; use `-q` to suppress them. `PRIV_SANITIZER_LOCAL_STAGING=1`
+is the equivalent environment setting. Set `PRIV_SANITIZER_STAGE_DIR` when
+`/tmp` is not large enough.
 
 ## Common use
 

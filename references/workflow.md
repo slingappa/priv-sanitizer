@@ -47,7 +47,8 @@ render setting starts a new state rather than mixing incompatible outputs.
 Batch mode reads sources directly by default. For network-mounted recordings,
 add `--local-staging` (or set `PRIV_SANITIZER_LOCAL_STAGING=1`) to stage each
 source video in local scratch, normally `/tmp`, before analysis/rendering; only
-the final delivery is copied back. Set
+the final delivery is copied back. Copy-in, retained-artifact, and final-
+delivery transfers report percentage and ETA unless `-q` is used. Set
 `PRIV_SANITIZER_STAGE_DIR=/path/to/local/scratch` to choose the scratch volume.
 
 The baseline uses the stable coarse layout/OCR/Haar path plus the established

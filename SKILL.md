@@ -58,8 +58,9 @@ Batch analysis reads sources directly by default. When recordings are on a
 network mount, opt in with `--local-staging` (or
 `PRIV_SANITIZER_LOCAL_STAGING=1`) to stage one video at a time in local scratch,
 normally `/tmp`; repeated frame/OCR/face reads then stay local and only the
-final delivery is copied back. Choose another scratch volume with
-`PRIV_SANITIZER_STAGE_DIR`.
+final delivery is copied back. Transfer progress and ETA are shown for the
+copy-in and copy-out steps unless `-q` is used. Choose another scratch volume
+with `PRIV_SANITIZER_STAGE_DIR`.
 
 For a new machine, run `bash scripts/install.sh` once. The installer provisions
 the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision

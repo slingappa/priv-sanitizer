@@ -73,6 +73,48 @@ def test_local_staging_is_opt_in(monkeypatch):
     assert pipeline._local_staging_enabled(None) is True
 
 
+def test_staging_copy_reports_progress_and_preserves_contents(tmp_path):
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "scratch" / "source.mp4"
+    source.write_bytes((b"0123456789abcdef" * 1024 * 256) + b"tail")
+    progress = []
+
+    with patch.object(
+        pipeline,
+        "_progress_status",
+        side_effect=lambda stage, percent, **kwargs: progress.append(
+            (stage, percent, kwargs.get("final", False))
+        ),
+    ):
+        pipeline._copy_with_progress(source, destination, "staging video")
+
+    assert destination.read_bytes() == source.read_bytes()
+    assert progress[0] == ("staging video", 0.0, False)
+    assert progress[-1] == ("staging video", 100.0, True)
+    assert any(percent > 0 for _, percent, _ in progress[1:])
+
+
+def test_publishing_copy_reports_progress_and_is_atomic(tmp_path):
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "output" / "sanitized.mp4"
+    source.write_bytes(b"sanitized" * 1024)
+    progress = []
+
+    with patch.object(
+        pipeline,
+        "_progress_status",
+        side_effect=lambda stage, percent, **kwargs: progress.append(
+            (stage, percent, kwargs.get("final", False))
+        ),
+    ):
+        pipeline._publish_output(source, destination)
+
+    assert destination.read_bytes() == source.read_bytes()
+    assert progress[0] == ("publishing output", 0.0, False)
+    assert progress[-1] == ("publishing output", 100.0, True)
+    assert not list(destination.parent.glob("*.part"))
+
+
 def test_batch_options_are_available_in_no_argument_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args([

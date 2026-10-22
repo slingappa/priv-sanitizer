@@ -10,7 +10,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .media import (
     ToolError,
@@ -514,7 +514,7 @@ def _publish_output(source: Path, destination: Path) -> None:
     temporary = destination.with_name(f".{destination.name}.part")
     try:
         temporary.unlink(missing_ok=True)
-        shutil.copy2(source, temporary)
+        _copy_with_progress(source, temporary, "publishing output")
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -526,6 +526,70 @@ def _local_staging_enabled(value: bool | None) -> bool:
         return bool(value)
     configured = os.environ.get("PRIV_SANITIZER_LOCAL_STAGING", "0").lower()
     return configured in {"1", "true", "yes", "on"}
+
+
+def _copy_file_bytes(
+    source: Path,
+    destination: Path,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Copy one file and report bytes copied through an optional callback."""
+    total = max(0, source.stat().st_size)
+    copied = 0
+    chunk_size = 4 * 1024 * 1024
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as source_stream, destination.open("wb") as destination_stream:
+        while True:
+            chunk = source_stream.read(chunk_size)
+            if not chunk:
+                break
+            destination_stream.write(chunk)
+            copied += len(chunk)
+            if progress is not None:
+                progress(copied, total)
+    shutil.copystat(source, destination)
+    return copied
+
+
+def _copy_with_progress(source: Path, destination: Path, stage: str) -> None:
+    """Copy one file in chunks while reporting percentage and ETA."""
+    total = max(0, source.stat().st_size)
+    _progress_status(stage, 0.0)
+
+    def report(copied: int, file_total: int) -> None:
+        percent = 100.0 if file_total == 0 else min(100.0, copied * 100.0 / file_total)
+        if percent < 100.0:
+            _progress_status(stage, percent)
+
+    _copy_file_bytes(source, destination, progress=report)
+    _progress_status(stage, 100.0, final=True)
+
+
+def _copy_tree_with_progress(source_root: Path, destination_root: Path, stage: str) -> None:
+    """Copy an audit tree while reporting aggregate byte progress."""
+    files = sorted(path for path in source_root.rglob("*") if path.is_file())
+    total = sum(path.stat().st_size for path in files)
+    copied_total = 0
+    _progress_status(stage, 0.0)
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for source in sorted(source_root.rglob("*")):
+        relative = source.relative_to(source_root)
+        destination = destination_root / relative
+        if source.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        if not source.is_file():
+            continue
+
+        def report(copied: int, file_total: int) -> None:
+            aggregate = copied_total + copied
+            percent = 100.0 if total == 0 else min(100.0, aggregate * 100.0 / total)
+            if percent < 100.0:
+                _progress_status(stage, percent)
+
+        copied_total += _copy_file_bytes(source, destination, progress=report)
+    _progress_status(stage, 100.0, final=True)
 
 
 def _stage_batch_inputs(
@@ -551,7 +615,7 @@ def _stage_batch_inputs(
         staged_video.parent.mkdir(parents=True, exist_ok=True)
         started = time.perf_counter()
         _status(f"staging input locally: {video.name}")
-        shutil.copy2(video, staged_video)
+        _copy_with_progress(video, staged_video, "staging video")
         _status(
             f"local staging complete: {source_size / (1024 ** 2):.0f} MiB in "
             f"{time.perf_counter() - started:.1f}s"
@@ -559,7 +623,8 @@ def _stage_batch_inputs(
         staged_transcript: Path | None = None
         if transcript:
             staged_transcript = stage_root / "input" / transcript.name
-            shutil.copy2(transcript, staged_transcript)
+            _status(f"staging transcript locally: {transcript.name}")
+            _copy_with_progress(transcript, staged_transcript, "staging transcript")
         return stage_root, staged_video, staged_transcript
     except Exception:
         shutil.rmtree(stage_root, ignore_errors=True)
@@ -569,7 +634,7 @@ def _stage_batch_inputs(
 def _retain_staged_artifacts(local_root: Path, network_root: Path) -> None:
     """Copy audit material back and rewrite temporary paths in JSON traces."""
     network_root.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(local_root, network_root, dirs_exist_ok=True)
+    _copy_tree_with_progress(local_root, network_root, "retaining artifacts")
     local_prefix = str(local_root.resolve())
     network_prefix = str(network_root.resolve())
     for json_path in network_root.rglob("*.json"):
