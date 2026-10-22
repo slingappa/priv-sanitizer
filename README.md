@@ -69,6 +69,25 @@ percentage and ETA; use `-q` to suppress them. `PRIV_SANITIZER_LOCAL_STAGING=1`
 is the equivalent environment setting. Set `PRIV_SANITIZER_STAGE_DIR` when
 `/tmp` is not large enough.
 
+For a SharePoint-mounted recordings folder, use Graph for the file bytes
+instead of copying through the FUSE mount:
+
+```bash
+priv-sanitizer batch \
+  --input /path/to/mounted/recordings \
+  --sharepoint-dir 'https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings' \
+  --output /path/to/local/outputs_sanitized
+```
+
+`--sharepoint-dir` implies local staging. The input directory is used only to
+discover video/transcript names; each source is downloaded directly through
+Microsoft Graph, and completed deliveries are uploaded to the remote
+`outputs_sanitized/` child folder. The local delivery copy is retained too.
+Configure a delegated token for `https://graph.microsoft.com/v1.0` through
+your organization's Secrets Manager before using this option. Use the native
+launcher for this workflow; the optional Docker image does not include the
+host's `secrets` helper.
+
 ## Common use
 
 Process a selected folder:
@@ -206,6 +225,7 @@ Near 100%, FFmpeg may spend time flushing and finalizing the MP4; check
 ```text
 priv-sanitizer [options]                         batch current directory
 priv-sanitizer batch --input DIR [--output DIR] [--artifacts DIR]
+                    [--sharepoint-dir URL]
 priv-sanitizer sanitize --video FILE --output DIR
 priv-sanitizer inspect FILE --job DIR
 priv-sanitizer analyze JOB
@@ -217,7 +237,8 @@ priv-sanitizer verify JOB --output DIR
 
 Useful options: `-j N` (threads), `-b VALUE` (blur strength), `-k` (keep
 artifacts), `-w` (experimental whiteboard mode), `-v` (verbose), and `-q`
-(quiet). Batch also accepts `--experimental-audio` and `--every SECONDS`.
+(quiet). Batch also accepts `--experimental-audio`, `--every SECONDS`,
+`--local-staging`, and `--sharepoint-dir URL`.
 
 Run `priv-sanitizer --help` or `priv-sanitizer <command> --help` for the full
 current parser help.

@@ -51,6 +51,13 @@ the final delivery is copied back. Copy-in, retained-artifact, and final-
 delivery transfers report percentage and ETA unless `-q` is used. Set
 `PRIV_SANITIZER_STAGE_DIR=/path/to/local/scratch` to choose the scratch volume.
 
+For a SharePoint-mounted input, avoid FUSE video reads by adding
+`--sharepoint-dir 'https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings'`.
+The local `--input` directory supplies names; Graph downloads each source into
+scratch and uploads completed files to the remote `outputs_sanitized/` child.
+The local `--output` copy is retained as well. This requires a delegated
+Microsoft Graph token configured through the organization's Secrets Manager.
+
 The baseline uses the stable coarse layout/OCR/Haar path plus the established
 scene-change triggers. The experimental physical-camera/whiteboard path is
 opt-in only: add `-w`/`--whiteboard` to enable frame-difference face sampling,

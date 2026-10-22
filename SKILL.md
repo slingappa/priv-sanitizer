@@ -62,6 +62,14 @@ final delivery is copied back. Transfer progress and ETA are shown for the
 copy-in and copy-out steps unless `-q` is used. Choose another scratch volume
 with `PRIV_SANITIZER_STAGE_DIR`.
 
+For SharePoint-mounted recordings, pass `--sharepoint-dir URL` with the local
+directory used to discover names. This implies local staging, downloads video
+and optional transcript bytes directly through Microsoft Graph, and uploads
+completed deliveries to the remote `outputs_sanitized/` child folder while
+also keeping the local delivery copy. A delegated Graph token for
+`https://graph.microsoft.com/v1.0` must already be available through the
+organization's Secrets Manager.
+
 For a new machine, run `bash scripts/install.sh` once. The installer provisions
 the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision
 dependencies, and installs persistent user launchers in `~/.local/bin`; the

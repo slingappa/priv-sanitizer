@@ -36,6 +36,7 @@ from .media import (
     sample_frames,
 )
 from .transcript import hardening_intervals, parse as parse_transcript
+from .sharepoint import SharePointClient
 
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"})
@@ -428,12 +429,18 @@ def _file_fingerprint(path: Path | None) -> dict[str, int] | None:
     return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
 
 
-def _batch_settings(*, experimental_audio: bool, every: float) -> dict[str, Any]:
+def _batch_settings(
+    *,
+    experimental_audio: bool,
+    every: float,
+    sharepoint_dir: str | None = None,
+) -> dict[str, Any]:
     """Capture output-affecting settings used to decide whether to resume."""
     return {
         "experimental_audio": bool(experimental_audio),
         "every": round(float(every), 3),
         "privacy": effective_privacy_settings(),
+        "sharepoint_dir": sharepoint_dir,
     }
 
 
@@ -449,8 +456,14 @@ def _state_matches(
     # State files created before local staging was introduced did not carry
     # that key. They are compatible with the current renderer; normalize the
     # missing field so an interrupted older batch can still resume.
-    if isinstance(stored_settings, dict) and "local_staging" not in stored_settings:
-        stored_settings = {**stored_settings, "local_staging": settings.get("local_staging")}
+    if isinstance(stored_settings, dict):
+        missing = {
+            key: settings.get(key)
+            for key in ("local_staging", "sharepoint_dir")
+            if key not in stored_settings
+        }
+        if missing:
+            stored_settings = {**stored_settings, **missing}
     return (
         state.get("schema_version") == BATCH_STATE_SCHEMA_VERSION
         and state.get("input_dir") == str(input_dir)
@@ -595,6 +608,7 @@ def _copy_tree_with_progress(source_root: Path, destination_root: Path, stage: s
 def _stage_batch_inputs(
     video: Path,
     transcript: Path | None,
+    sharepoint: SharePointClient | None = None,
 ) -> tuple[Path, Path, Path | None]:
     """Copy one batch item to local scratch so analysis rereads stay local."""
     base_dir = Path(os.environ.get("PRIV_SANITIZER_STAGE_DIR", tempfile.gettempdir())).expanduser()
@@ -615,7 +629,10 @@ def _stage_batch_inputs(
         staged_video.parent.mkdir(parents=True, exist_ok=True)
         started = time.perf_counter()
         _status(f"staging input locally: {video.name}")
-        _copy_with_progress(video, staged_video, "staging video")
+        if sharepoint is None:
+            _copy_with_progress(video, staged_video, "staging video")
+        else:
+            sharepoint.download_file(video.name, staged_video, stage="staging video")
         _status(
             f"local staging complete: {source_size / (1024 ** 2):.0f} MiB in "
             f"{time.perf_counter() - started:.1f}s"
@@ -624,7 +641,12 @@ def _stage_batch_inputs(
         if transcript:
             staged_transcript = stage_root / "input" / transcript.name
             _status(f"staging transcript locally: {transcript.name}")
-            _copy_with_progress(transcript, staged_transcript, "staging transcript")
+            if sharepoint is None:
+                _copy_with_progress(transcript, staged_transcript, "staging transcript")
+            else:
+                sharepoint.download_file(
+                    transcript.name, staged_transcript, stage="staging transcript"
+                )
         return stage_root, staged_video, staged_transcript
     except Exception:
         shutil.rmtree(stage_root, ignore_errors=True)
@@ -719,6 +741,7 @@ def batch(
     keep_videos: bool | None = None,
     every: float = 4.0,
     local_staging: bool | None = None,
+    sharepoint_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run a batch and resume completed items after interruption."""
     # ``keep_videos`` is retained as a Python API compatibility alias. The
@@ -733,11 +756,17 @@ def batch(
     # Batch diagnostics travel with the deliveries, not the caller's cwd.
     os.environ["PRIV_SANITIZER_VERBOSE_LOG"] = str(output_dir / "verbose.log")
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    sharepoint = SharePointClient(sharepoint_dir) if sharepoint_dir else None
     videos = discover_videos(input_dir, output_dir)
     transcripts = discover_transcripts(input_dir)
-    settings = _batch_settings(experimental_audio=experimental_audio, every=every)
+    effective_local_staging = _local_staging_enabled(local_staging) or sharepoint is not None
+    settings = _batch_settings(
+        experimental_audio=experimental_audio,
+        every=every,
+        sharepoint_dir=sharepoint.folder_url if sharepoint else None,
+    )
     settings["keep_artifacts"] = bool(keep_artifacts)
-    settings["local_staging"] = _local_staging_enabled(local_staging)
+    settings["local_staging"] = effective_local_staging
     state_path = output_dir / BATCH_STATE_FILENAME
     previous_state = _load_batch_state(
         state_path,
@@ -859,7 +888,7 @@ def batch(
             continue
         state_entry.update({
             "status": "running",
-            "stage": "staging" if _local_staging_enabled(local_staging) else "baseline-analysis",
+            "stage": "staging" if effective_local_staging else "baseline-analysis",
             "started_at": now(),
             "error": None,
         })
@@ -881,15 +910,19 @@ def batch(
         processing_video = video
         processing_transcript = transcript
         try:
-            if _local_staging_enabled(local_staging):
+            if effective_local_staging:
                 try:
                     stage_root, processing_video, processing_transcript = _stage_batch_inputs(
-                        video, transcript
+                        video, transcript, sharepoint=sharepoint
                     )
                     video_root = stage_root / "artifacts" / output_key
                     baseline_dir = video_root / "baseline"
                     baseline_job = baseline_dir / "job"
                 except OSError as exc:
+                    if sharepoint is not None:
+                        raise ToolError(
+                            f"SharePoint local staging failed for {video.name}: {exc}"
+                        ) from exc
                     entry["warnings"].append(f"local staging unavailable; processing source directly: {exc}")
                     _status(f"local staging unavailable; processing source directly: {video.name}")
                     state_entry["stage"] = "baseline-analysis"
@@ -996,6 +1029,8 @@ def batch(
             state_entry["stage"] = "publishing"
             persist_state()
             _publish_output(final_source, final_output)
+            if sharepoint is not None:
+                sharepoint.upload_file(final_output, final_output.name)
             entry["final_output"] = str(final_output.resolve())
             entry["status"] = "completed" if entry["baseline"]["status"] == "completed" else "failed"
             if entry["status"] == "completed":
@@ -1040,6 +1075,10 @@ def batch(
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
+        "sharepoint_dir": sharepoint.folder_url if sharepoint else None,
+        "sharepoint_output_folder": (
+            f"{sharepoint.folder_url}/outputs_sanitized" if sharepoint else None
+        ),
         "batch_state": str(state_path),
         "resumed": state_needs_resume,
         "experimental_audio_redaction": experimental_audio,

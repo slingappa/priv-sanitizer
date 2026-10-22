@@ -195,6 +195,13 @@ def _add_batch_options(parser: argparse.ArgumentParser) -> None:
         help="audit directory; artifacts are removed unless -k is used (default: ./artifacts)",
     )
     parser.add_argument(
+        "--sharepoint-dir", default=argparse.SUPPRESS, metavar="URL",
+        help=(
+            "optional SharePoint folder URL; download staged inputs directly via Graph "
+            "and upload deliveries to its outputs_sanitized child"
+        ),
+    )
+    parser.add_argument(
         "--experimental-audio", "--experimental-audio-redaction",
         action="store_true", dest="experimental_audio", default=argparse.SUPPRESS,
         help="EXPERIMENTAL: use transcript matches for short spoken-name mute windows",
@@ -242,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
   # Keep generated audit artifacts for debugging as well as final delivery copies.
   priv-sanitizer batch --input "$VIDEO_DIR" --keep-artifacts
 
+  # Use Graph instead of FUSE reads for a SharePoint-mounted input folder.
+  priv-sanitizer batch --input /path/to/mounted/recordings \\
+      --sharepoint-dir 'https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings'
+
   # Tune visual blur strength; 100% is recommended for privacy.
   priv-sanitizer -j8 -k -b 100%
 
@@ -281,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         input=Path.cwd(),
         output=Path.cwd() / "outputs_sanitized",
         artifacts=None,
+        sharepoint_dir=None,
         experimental_audio=False,
         keep_artifacts=False,
         whiteboard=False,
@@ -294,7 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
         "batch",
         help="sanitize every video in a folder with optional transcript hardening",
         description="Run baseline sanitization for every video, then optionally harden with matching transcripts.",
-        epilog="Example:\n  priv-sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts",
+        epilog=(
+            "Examples:\n"
+            "  priv-sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts\n"
+            "  priv-sanitizer batch --input /mounted/recordings --sharepoint-dir \\\n"
+            "      'https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings'"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_verbose_option(batch_cmd)
@@ -472,6 +489,7 @@ def main(argv: list[str] | None = None) -> None:
                     keep_artifacts=args.keep_artifacts,
                     every=args.every,
                     local_staging=args.local_staging,
+                    sharepoint_dir=args.sharepoint_dir,
                 ),
                 indent=2,
             ))

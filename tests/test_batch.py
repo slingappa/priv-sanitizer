@@ -58,6 +58,9 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["--no-local-staging"]).local_staging is False
     assert build_parser().parse_args(["batch", "--local-staging"]).local_staging is True
     assert build_parser().parse_args(["batch", "--no-local-staging"]).local_staging is False
+    sharepoint = "https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings"
+    assert build_parser().parse_args(["--sharepoint-dir", sharepoint]).sharepoint_dir == sharepoint
+    assert build_parser().parse_args(["batch", "--sharepoint-dir", sharepoint]).sharepoint_dir == sharepoint
     assert build_parser().parse_args(["--aggressive"]).aggressive is True
     assert build_parser().parse_args(["batch", "--balanced"]).aggressive is False
     assert build_parser().parse_args(["-w"]).whiteboard is True
@@ -113,6 +116,49 @@ def test_publishing_copy_reports_progress_and_is_atomic(tmp_path):
     assert progress[0] == ("publishing output", 0.0, False)
     assert progress[-1] == ("publishing output", 100.0, True)
     assert not list(destination.parent.glob("*.part"))
+
+
+def test_sharepoint_batch_downloads_and_uploads_without_fuse_copy(tmp_path):
+    video = tmp_path / "meeting.mp4"
+    video.write_bytes(b"mounted placeholder")
+    output = tmp_path / "outputs_sanitized"
+    remote_url = "https://tenant.sharepoint.com/teams/site/Shared%20Documents/Recordings"
+    calls = []
+
+    class FakeSharePoint:
+        folder_url = remote_url
+
+        def download_file(self, name, destination, *, stage):
+            calls.append(("download", name, stage))
+            destination.write_bytes(b"direct Graph download")
+
+        def upload_file(self, source, name=None):
+            calls.append(("upload", source.name, name))
+
+    def fake_baseline(source: Path, job: Path, **kwargs):
+        job.mkdir(parents=True, exist_ok=True)
+        (job / "redaction-manifest.json").write_text(
+            json.dumps({"source": {"video": str(source)}, "audio_mode": "preserve", "visual_redactions": [], "audio_redactions": []}),
+            encoding="utf-8",
+        )
+
+    def fake_render(job: Path, output_dir: Path, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "sanitized.mp4").write_bytes(b"sanitized")
+        return {"verify": {"passed": True}}
+
+    with patch.object(pipeline, "SharePointClient", return_value=FakeSharePoint()), patch.object(
+        pipeline, "baseline", side_effect=fake_baseline
+    ), patch.object(pipeline, "render_job", side_effect=fake_render):
+        report = pipeline.batch(tmp_path, output, sharepoint_dir=remote_url)
+
+    assert report["sharepoint_dir"] == remote_url
+    assert report["sharepoint_output_folder"].endswith("/outputs_sanitized")
+    assert calls == [
+        ("download", "meeting.mp4", "staging video"),
+        ("upload", "meeting.mp4", "meeting.mp4"),
+    ]
+    assert (output / "meeting.mp4").read_bytes() == b"sanitized"
 
 
 def test_batch_options_are_available_in_no_argument_mode(tmp_path, monkeypatch):
