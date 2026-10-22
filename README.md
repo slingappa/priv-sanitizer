@@ -54,12 +54,18 @@ unfinished items and reuses completed deliveries. Changing the input folder,
 output folder, transcript/settings, or sampling options starts a fresh batch
 state instead of mixing jobs.
 
-Batch mode stages one source video at a time into local scratch space (usually
-`/tmp`) by default. Analysis and rendering then reread the local copy instead
-of continuously reading a network mount; only the source staging copy and
-final delivery cross the network. Use `--no-local-staging` or set
-`PRIV_SANITIZER_LOCAL_STAGING=0` to disable this behavior. Set
-`PRIV_SANITIZER_STAGE_DIR` when `/tmp` is not large enough.
+Batch mode reads sources directly by default. If the input or output is on a
+network mount, opt in to one-video-at-a-time local scratch staging:
+
+```bash
+priv-sanitizer --local-staging --input /path/to/recordings \
+  --output /path/to/outputs_sanitized
+```
+
+Analysis and rendering then reread the local copy instead of continuously
+reading a network mount; only the source staging copy and final delivery cross
+the network. `PRIV_SANITIZER_LOCAL_STAGING=1` is the equivalent environment
+setting. Set `PRIV_SANITIZER_STAGE_DIR` when `/tmp` is not large enough.
 
 ## Common use
 

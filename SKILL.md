@@ -54,11 +54,12 @@ next invocation with matching settings reuses completed videos and resumes the
 unfinished ones. Source/transcript fingerprints and output probing prevent a
 stale or partial MP4 from being mistaken for a completed item.
 
-Batch analysis stages one video at a time into local scratch space, normally
-`/tmp`, so repeated frame/OCR/face reads do not traverse a network mount. The
-final delivery is copied back to the requested output directory. Disable this
-with `--no-local-staging` or `PRIV_SANITIZER_LOCAL_STAGING=0`, or choose another
-scratch volume with `PRIV_SANITIZER_STAGE_DIR`.
+Batch analysis reads sources directly by default. When recordings are on a
+network mount, opt in with `--local-staging` (or
+`PRIV_SANITIZER_LOCAL_STAGING=1`) to stage one video at a time in local scratch,
+normally `/tmp`; repeated frame/OCR/face reads then stay local and only the
+final delivery is copied back. Choose another scratch volume with
+`PRIV_SANITIZER_STAGE_DIR`.
 
 For a new machine, run `bash scripts/install.sh` once. The installer provisions
 the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision

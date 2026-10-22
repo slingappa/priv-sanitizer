@@ -44,11 +44,11 @@ delivery is partial, rerunning the same batch resumes completed and unfinished
 items instead of starting every video over. A changed input, transcript, or
 render setting starts a new state rather than mixing incompatible outputs.
 
-Batch mode stages each source video in local scratch (normally `/tmp`) before
-analysis and rendering, then copies only the final delivery back to the output
-directory. This avoids repeated network-mounted reads. Use
-`--no-local-staging`, `PRIV_SANITIZER_LOCAL_STAGING=0`, or
-`PRIV_SANITIZER_STAGE_DIR=/path/to/local/scratch` to control it.
+Batch mode reads sources directly by default. For network-mounted recordings,
+add `--local-staging` (or set `PRIV_SANITIZER_LOCAL_STAGING=1`) to stage each
+source video in local scratch, normally `/tmp`, before analysis/rendering; only
+the final delivery is copied back. Set
+`PRIV_SANITIZER_STAGE_DIR=/path/to/local/scratch` to choose the scratch volume.
 
 The baseline uses the stable coarse layout/OCR/Haar path plus the established
 scene-change triggers. The experimental physical-camera/whiteboard path is

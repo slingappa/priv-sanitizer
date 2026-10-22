@@ -524,8 +524,8 @@ def _local_staging_enabled(value: bool | None) -> bool:
     """Return whether batch inputs should be copied to local scratch first."""
     if value is not None:
         return bool(value)
-    configured = os.environ.get("PRIV_SANITIZER_LOCAL_STAGING", "1").lower()
-    return configured not in {"0", "false", "no", "off"}
+    configured = os.environ.get("PRIV_SANITIZER_LOCAL_STAGING", "0").lower()
+    return configured in {"1", "true", "yes", "on"}
 
 
 def _stage_batch_inputs(

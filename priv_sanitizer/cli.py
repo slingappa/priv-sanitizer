@@ -203,10 +203,17 @@ def _add_batch_options(parser: argparse.ArgumentParser) -> None:
         "--every", type=float, default=argparse.SUPPRESS, metavar="SECONDS",
         help="coarse frame sampling interval in seconds (default: 4)",
     )
-    parser.add_argument(
-        "--no-local-staging", dest="local_staging", action="store_false",
+    staging = parser.add_mutually_exclusive_group()
+    staging.add_argument(
+        "--local-staging", dest="local_staging", action="store_true",
         default=argparse.SUPPRESS,
-        help="process directly from the source filesystem instead of local /tmp staging",
+        help="copy each video to local scratch before analysis/rendering (useful for network mounts)",
+    )
+    # Compatibility for the short-lived opt-out spelling; the public control
+    # is now the explicit opt-in --local-staging flag.
+    staging.add_argument(
+        "--no-local-staging", dest="local_staging", action="store_false",
+        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
     )
 
 
@@ -278,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
         keep_artifacts=False,
         whiteboard=False,
         every=4.0,
-        local_staging=None,
+        local_staging=False,
     )
 
     batch_cmd = sub.add_parser(
