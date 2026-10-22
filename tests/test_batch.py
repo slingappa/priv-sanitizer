@@ -63,7 +63,7 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["-w"]).whiteboard is True
     assert build_parser().parse_args(["batch", "-w"]).whiteboard is True
     assert build_parser().parse_args([]).whiteboard is False
-    assert build_parser().parse_args([]).local_staging is False
+    assert build_parser().parse_args([]).local_staging is None
 
 
 def test_local_staging_is_opt_in(monkeypatch):

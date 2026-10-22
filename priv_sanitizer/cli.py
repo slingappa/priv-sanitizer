@@ -285,7 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
         keep_artifacts=False,
         whiteboard=False,
         every=4.0,
-        local_staging=False,
+        # Leave this unset so the pipeline can honor the opt-in environment
+        # override while its own default remains direct processing.
+        local_staging=None,
     )
 
     batch_cmd = sub.add_parser(
