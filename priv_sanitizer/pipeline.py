@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import shutil
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,11 +139,16 @@ def baseline(
     audio_mode: str = "preserve",
     every: float = 4.0,
     analyze_audio: bool | None = None,
+    source_display: Path | None = None,
 ) -> dict[str, Any]:
     video = video.resolve()
+    display_video = (source_display or video).expanduser().resolve()
     job.mkdir(parents=True, exist_ok=True)
     _status("probing input")
     info = probe(video)
+    # Keep audit manifests tied to the user's source path even when the
+    # decoder is reading a local staged copy.
+    info["path"] = str(display_video)
     write_json(job / "probe.json", info)
     stage_started = time.perf_counter()
     sample_every = adaptive_sampling_interval(every, info["duration"])
@@ -204,7 +210,7 @@ def baseline(
     manifest = {
         "schema_version": 1,
         "created_at": now(),
-        "source": {"video": str(video), "video_name": video.name},
+        "source": {"video": str(display_video), "video_name": display_video.name},
         "policy": (
             "experimental-whiteboard-localized-participant-regions"
             if privacy_settings["whiteboard"] else "conservative"
@@ -384,10 +390,11 @@ def render_job(
     output_dir: Path,
     *,
     verify_audio: bool | None = None,
+    source_override: Path | None = None,
 ) -> dict[str, Any]:
     _status("preparing render")
     manifest = read_json(job / "redaction-manifest.json")
-    source = Path(manifest["source"]["video"])
+    source = (source_override or Path(manifest["source"]["video"])).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     result = render(source, manifest, output_dir / "sanitized.mp4")
     if verify_audio is None:
@@ -507,6 +514,68 @@ def _publish_output(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _local_staging_enabled(value: bool | None) -> bool:
+    """Return whether batch inputs should be copied to local scratch first."""
+    if value is not None:
+        return bool(value)
+    configured = os.environ.get("PRIV_SANITIZER_LOCAL_STAGING", "1").lower()
+    return configured not in {"0", "false", "no", "off"}
+
+
+def _stage_batch_inputs(
+    video: Path,
+    transcript: Path | None,
+) -> tuple[Path, Path, Path | None]:
+    """Copy one batch item to local scratch so analysis rereads stay local."""
+    base_dir = Path(os.environ.get("PRIV_SANITIZER_STAGE_DIR", tempfile.gettempdir())).expanduser()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    source_size = video.stat().st_size
+    free_bytes = shutil.disk_usage(base_dir).free
+    # Frames and detector sidecars can temporarily consume roughly another
+    # copy of a large recording. Fall back to direct processing rather than
+    # filling /tmp and failing halfway through a batch.
+    if free_bytes < source_size * 2 + 512 * 1024 * 1024:
+        raise OSError(
+            f"local staging needs about {source_size * 2 / (1024 ** 3):.1f} GiB; "
+            f"only {free_bytes / (1024 ** 3):.1f} GiB is free"
+        )
+    stage_root = Path(tempfile.mkdtemp(prefix="priv-sanitizer-", dir=base_dir))
+    try:
+        staged_video = stage_root / "input" / video.name
+        staged_video.parent.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        _status(f"staging input locally: {video.name}")
+        shutil.copy2(video, staged_video)
+        _status(
+            f"local staging complete: {source_size / (1024 ** 2):.0f} MiB in "
+            f"{time.perf_counter() - started:.1f}s"
+        )
+        staged_transcript: Path | None = None
+        if transcript:
+            staged_transcript = stage_root / "input" / transcript.name
+            shutil.copy2(transcript, staged_transcript)
+        return stage_root, staged_video, staged_transcript
+    except Exception:
+        shutil.rmtree(stage_root, ignore_errors=True)
+        raise
+
+
+def _retain_staged_artifacts(local_root: Path, network_root: Path) -> None:
+    """Copy audit material back and rewrite temporary paths in JSON traces."""
+    network_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(local_root, network_root, dirs_exist_ok=True)
+    local_prefix = str(local_root.resolve())
+    network_prefix = str(network_root.resolve())
+    for json_path in network_root.rglob("*.json"):
+        try:
+            text = json_path.read_text(encoding="utf-8")
+            rewritten = text.replace(local_prefix, network_prefix)
+            if rewritten != text:
+                json_path.write_text(rewritten, encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+
+
 def _redaction_signature(manifest: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """Return render-relevant redactions without detector IDs/evidence noise."""
     signature: list[tuple[Any, ...]] = []
@@ -578,6 +647,7 @@ def batch(
     keep_artifacts: bool = False,
     keep_videos: bool | None = None,
     every: float = 4.0,
+    local_staging: bool | None = None,
 ) -> dict[str, Any]:
     """Run a batch and resume completed items after interruption."""
     # ``keep_videos`` is retained as a Python API compatibility alias. The
@@ -589,11 +659,14 @@ def batch(
     output_dir = output_dir.expanduser().resolve()
     artifacts_dir = (artifacts_dir or output_dir.parent / "artifacts").expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Batch diagnostics travel with the deliveries, not the caller's cwd.
+    os.environ["PRIV_SANITIZER_VERBOSE_LOG"] = str(output_dir / "verbose.log")
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     videos = discover_videos(input_dir, output_dir)
     transcripts = discover_transcripts(input_dir)
     settings = _batch_settings(experimental_audio=experimental_audio, every=every)
     settings["keep_artifacts"] = bool(keep_artifacts)
+    settings["local_staging"] = _local_staging_enabled(local_staging)
     state_path = output_dir / BATCH_STATE_FILENAME
     previous_state = _load_batch_state(
         state_path,
@@ -653,7 +726,11 @@ def batch(
         )
         status = "pending"
         final_output = output_dir / f"{output_key}.mp4"
-        if same_inputs and old.get("status") in {"completed", "running"}:
+        if (
+            same_inputs
+            and old.get("status") in {"completed", "running"}
+            and (not keep_artifacts or old.get("artifacts_retained") is True)
+        ):
             if _output_is_complete(video, final_output):
                 status = "completed"
         state["videos"].append({
@@ -667,6 +744,7 @@ def batch(
             "stage": None,
             "started_at": old.get("started_at") if same_inputs and old else None,
             "completed_at": old.get("completed_at") if status == "completed" and old else None,
+            "artifacts_retained": old.get("artifacts_retained") if status == "completed" and old else False,
             "error": None,
         })
     _write_atomic_json(state_path, state)
@@ -680,7 +758,8 @@ def batch(
     for index, ((video, output_key, planned_transcript), state_entry) in enumerate(
         zip(plans, state["videos"]), start=1
     ):
-        video_root = artifacts_dir / output_key
+        network_video_root = artifacts_dir / output_key
+        video_root = network_video_root
         baseline_dir = video_root / "baseline"
         baseline_job = baseline_dir / "job"
         transcript, pairing_warnings = match_transcript(
@@ -709,7 +788,7 @@ def batch(
             continue
         state_entry.update({
             "status": "running",
-            "stage": "baseline-analysis",
+            "stage": "staging" if _local_staging_enabled(local_staging) else "baseline-analysis",
             "started_at": now(),
             "error": None,
         })
@@ -727,14 +806,34 @@ def batch(
             "final_output": None,
         }
         final_source: Path | None = None
+        stage_root: Path | None = None
+        processing_video = video
+        processing_transcript = transcript
         try:
+            if _local_staging_enabled(local_staging):
+                try:
+                    stage_root, processing_video, processing_transcript = _stage_batch_inputs(
+                        video, transcript
+                    )
+                    video_root = stage_root / "artifacts" / output_key
+                    baseline_dir = video_root / "baseline"
+                    baseline_job = baseline_dir / "job"
+                except OSError as exc:
+                    entry["warnings"].append(f"local staging unavailable; processing source directly: {exc}")
+                    _status(f"local staging unavailable; processing source directly: {video.name}")
+                    state_entry["stage"] = "baseline-analysis"
+                    persist_state()
+            else:
+                state_entry["stage"] = "baseline-analysis"
+                persist_state()
             _status(f"batch {index}/{len(videos)}: baseline {video.name}")
             baseline(
-                video,
+                processing_video,
                 baseline_job,
                 audio_mode="preserve",
                 every=every,
                 analyze_audio=experimental_audio,
+                source_display=video,
             )
             entry["baseline"] = {
                 "status": "completed",
@@ -753,7 +852,7 @@ def batch(
                     _status(f"batch {index}/{len(videos)}: hardening {video.name}")
                     harden(
                         baseline_job,
-                        transcript,
+                        processing_transcript or transcript,
                         hardened_job,
                         narrow_audio=experimental_audio,
                         transcript_offset=0.0,
@@ -765,11 +864,16 @@ def batch(
                     state_entry["stage"] = "rendering"
                     persist_state()
                     _status("rendering transcript-hardened output (single pass)")
-                    hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
+                    hardened_render = render_job(
+                        hardened_job,
+                        hardened_dir,
+                        verify_audio=experimental_audio,
+                        source_override=processing_video,
+                    )
                     entry["hardened"] = {
                         "status": "completed" if hardened_render["verify"]["passed"] else "failed",
                         "rendered": True,
-                        "output": str((hardened_dir / "sanitized.mp4").resolve()),
+                        "output": str((network_video_root / "hardened" / "sanitized.mp4").resolve()),
                         "artifact_video_retained": keep_artifacts,
                         "artifacts_retained": keep_artifacts,
                         "verify": hardened_render["verify"],
@@ -789,11 +893,16 @@ def batch(
                 # verification. Encode the baseline exactly once as fallback.
                 state_entry["stage"] = "rendering"
                 persist_state()
-                baseline_render = render_job(baseline_job, baseline_dir, verify_audio=experimental_audio)
+                baseline_render = render_job(
+                    baseline_job,
+                    baseline_dir,
+                    verify_audio=experimental_audio,
+                    source_override=processing_video,
+                )
                 entry["baseline"] = {
                     "status": "completed" if baseline_render["verify"]["passed"] else "failed",
                     "rendered": True,
-                    "output": str((baseline_dir / "sanitized.mp4").resolve()),
+                    "output": str((network_video_root / "baseline" / "sanitized.mp4").resolve()),
                     "artifact_video_retained": keep_artifacts,
                     "artifacts_retained": keep_artifacts,
                     "verify": baseline_render["verify"],
@@ -803,6 +912,10 @@ def batch(
 
             if final_source is None or not final_source.exists():
                 raise RuntimeError("no rendered output was produced")
+            if stage_root is not None and keep_artifacts:
+                state_entry["stage"] = "retaining-artifacts"
+                persist_state()
+                _retain_staged_artifacts(video_root, network_video_root)
             # Keep detailed audit artifacts in the per-video directory, while
             # exposing a simple flat final-file contract for batch callers:
             # output_dir/<input-stem>.mp4.
@@ -818,6 +931,7 @@ def batch(
                 state_entry.update({
                     "status": "completed",
                     "stage": None,
+                    "artifacts_retained": bool(keep_artifacts),
                     "completed_at": now(),
                     "output_fingerprint": _file_fingerprint(final_output),
                 })
@@ -835,7 +949,9 @@ def batch(
                 # The flat output has already been copied when processing
                 # succeeds. Remove the complete generated audit tree unless
                 # the caller explicitly requested it for debugging.
-                _discard_artifact_tree(video_root, artifacts_dir)
+                _discard_artifact_tree(network_video_root, artifacts_dir)
+            if stage_root is not None:
+                shutil.rmtree(stage_root, ignore_errors=True)
         results.append(entry)
 
     completed_count = sum(item.get("status") == "completed" for item in results)

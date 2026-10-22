@@ -203,6 +203,11 @@ def _add_batch_options(parser: argparse.ArgumentParser) -> None:
         "--every", type=float, default=argparse.SUPPRESS, metavar="SECONDS",
         help="coarse frame sampling interval in seconds (default: 4)",
     )
+    parser.add_argument(
+        "--no-local-staging", dest="local_staging", action="store_false",
+        default=argparse.SUPPRESS,
+        help="process directly from the source filesystem instead of local /tmp staging",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         keep_artifacts=False,
         whiteboard=False,
         every=4.0,
+        local_staging=None,
     )
 
     batch_cmd = sub.add_parser(
@@ -456,6 +462,7 @@ def main(argv: list[str] | None = None) -> None:
                     experimental_audio=args.experimental_audio,
                     keep_artifacts=args.keep_artifacts,
                     every=args.every,
+                    local_staging=args.local_staging,
                 ),
                 indent=2,
             ))

@@ -54,6 +54,12 @@ next invocation with matching settings reuses completed videos and resumes the
 unfinished ones. Source/transcript fingerprints and output probing prevent a
 stale or partial MP4 from being mistaken for a completed item.
 
+Batch analysis stages one video at a time into local scratch space, normally
+`/tmp`, so repeated frame/OCR/face reads do not traverse a network mount. The
+final delivery is copied back to the requested output directory. Disable this
+with `--no-local-staging` or `PRIV_SANITIZER_LOCAL_STAGING=0`, or choose another
+scratch volume with `PRIV_SANITIZER_STAGE_DIR`.
+
 For a new machine, run `bash scripts/install.sh` once. The installer provisions
 the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision
 dependencies, and installs persistent user launchers in `~/.local/bin`; the
@@ -108,8 +114,8 @@ Rendering defaults to 8 FFmpeg threads with the `ultrafast` x264 preset. Use
 `PRIV_SANITIZER_FFMPEG_THREADS` and `PRIV_SANITIZER_X264_PRESET` to override
 those defaults through an integration.
 
-Diagnostics and periodic heartbeats are enabled by default and written to
-`verbose.log` in the caller's working directory; detailed command lines and
+Diagnostics and periodic heartbeats are enabled by default and, for batch
+runs, written to `outputs_sanitized/verbose.log`; detailed command lines and
 heartbeats are log-only. `-v`/`--verbose` explicitly forces this mode, `PRIV_SANITIZER_VERBOSE=0` disables it, and
 `PRIV_SANITIZER_HEARTBEAT_SECONDS` controls the heartbeat interval. Progress
 ETAs are ballpark estimates refreshed when the percentage advances; spinner

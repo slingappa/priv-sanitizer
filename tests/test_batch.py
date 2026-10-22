@@ -54,11 +54,14 @@ def test_jobs_option_accepts_global_and_batch_forms():
     assert build_parser().parse_args(["batch", "--blur-strength", "75%"]).blur_strength == 0.75
     assert build_parser().parse_args(["--face-padding", "20%"]).face_padding == 0.20
     assert build_parser().parse_args(["batch", "--face-padding", "0.12"]).face_padding == 0.12
+    assert build_parser().parse_args(["--no-local-staging"]).local_staging is False
+    assert build_parser().parse_args(["batch", "--no-local-staging"]).local_staging is False
     assert build_parser().parse_args(["--aggressive"]).aggressive is True
     assert build_parser().parse_args(["batch", "--balanced"]).aggressive is False
     assert build_parser().parse_args(["-w"]).whiteboard is True
     assert build_parser().parse_args(["batch", "-w"]).whiteboard is True
     assert build_parser().parse_args([]).whiteboard is False
+    assert build_parser().parse_args([]).local_staging is None
 
 
 def test_batch_options_are_available_in_no_argument_mode(tmp_path, monkeypatch):

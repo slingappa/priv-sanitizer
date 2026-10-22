@@ -54,6 +54,13 @@ unfinished items and reuses completed deliveries. Changing the input folder,
 output folder, transcript/settings, or sampling options starts a fresh batch
 state instead of mixing jobs.
 
+Batch mode stages one source video at a time into local scratch space (usually
+`/tmp`) by default. Analysis and rendering then reread the local copy instead
+of continuously reading a network mount; only the source staging copy and
+final delivery cross the network. Use `--no-local-staging` or set
+`PRIV_SANITIZER_LOCAL_STAGING=0` to disable this behavior. Set
+`PRIV_SANITIZER_STAGE_DIR` when `/tmp` is not large enough.
+
 ## Common use
 
 Process a selected folder:
@@ -170,6 +177,7 @@ The most useful files are:
 - `render.json` — render settings and output verification.
 - `artifacts/batch-report.json` — status of every batch item.
 - `outputs_sanitized/.priv-sanitizer-batch.json` — resumable batch state.
+- `outputs_sanitized/verbose.log` — status/heartbeat and diagnostic log.
 
 A transcript-hardened render uses a `hardened/` directory; otherwise it uses
 `baseline/`. In either case, deliver only the flat file in
@@ -179,11 +187,11 @@ Verification checks duration and the presence of video/audio streams. It is not
 proof of complete anonymization. Inspect full-screen participants, grid views,
 layout transitions, and any shared screen that might contain identifying data.
 
-A `verbose.log` is written in the recordings folder by default. Status lines
-show an animated spinner, percentage, and approximate ETA. Use `-v` for
-extra diagnostics; use `-q` to suppress terminal status and the log. Near
-100%, FFmpeg may spend time flushing and finalizing the MP4; check
-`verbose.log` before treating that as a hang.
+Batch runs write `verbose.log` beside the deliveries in `outputs_sanitized/`.
+Status lines show an animated spinner, percentage, and approximate ETA. Use
+`-v` for extra diagnostics; use `-q` to suppress terminal status and the log.
+Near 100%, FFmpeg may spend time flushing and finalizing the MP4; check
+`outputs_sanitized/verbose.log` before treating that as a hang.
 
 ## Compact CLI reference
 
