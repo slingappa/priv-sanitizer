@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .media import (
+    ToolError,
     _status,
     _progress_status,
     _coalesce_render_regions,
@@ -38,11 +39,30 @@ from .transcript import hardening_intervals, parse as parse_transcript
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"})
 TRANSCRIPT_EXTENSIONS = frozenset({".docx", ".srt", ".vtt"})
+BATCH_STATE_FILENAME = ".priv-sanitizer-batch.json"
+BATCH_STATE_SCHEMA_VERSION = 1
 
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _write_atomic_json(path: Path, value: Any) -> None:
+    """Write a small state file atomically so a kill cannot corrupt it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_json(path: Path) -> Any:
@@ -390,6 +410,103 @@ def _discard_artifact_tree(video_root: Path, artifacts_dir: Path) -> None:
         shutil.rmtree(root)
 
 
+def _file_fingerprint(path: Path | None) -> dict[str, int] | None:
+    """Return a cheap identity for a source/transcript file."""
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _batch_settings(*, experimental_audio: bool, every: float) -> dict[str, Any]:
+    """Capture output-affecting settings used to decide whether to resume."""
+    return {
+        "experimental_audio": bool(experimental_audio),
+        "every": round(float(every), 3),
+        "privacy": effective_privacy_settings(),
+    }
+
+
+def _state_matches(
+    state: dict[str, Any],
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    artifacts_dir: Path,
+    settings: dict[str, Any],
+) -> bool:
+    return (
+        state.get("schema_version") == BATCH_STATE_SCHEMA_VERSION
+        and state.get("input_dir") == str(input_dir)
+        and state.get("output_dir") == str(output_dir)
+        and state.get("artifacts_dir") == str(artifacts_dir)
+        and state.get("settings") == settings
+        and isinstance(state.get("videos"), list)
+    )
+
+
+def _load_batch_state(
+    path: Path,
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    artifacts_dir: Path,
+    settings: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Load a compatible state file; malformed/stale state starts a new job."""
+    if not path.is_file():
+        return None
+    try:
+        state = read_json(path)
+    except (OSError, ValueError, TypeError):
+        _status("ignoring unreadable batch state; starting a new job")
+        return None
+    if not isinstance(state, dict) or not _state_matches(
+        state,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        artifacts_dir=artifacts_dir,
+        settings=settings,
+    ):
+        _status("existing batch state does not match this input/settings; starting a new job")
+        return None
+    return state
+
+
+def _output_is_complete(source: Path, output: Path) -> bool:
+    """Reject missing/partial delivery files before marking an item resumed."""
+    if not output.is_file():
+        return False
+    try:
+        if output.stat().st_size <= 0:
+            return False
+        source_info = probe(source)
+        output_info = probe(output)
+    except (OSError, ToolError, ValueError, KeyError, TypeError):
+        return False
+    return (
+        abs(float(source_info["duration"]) - float(output_info["duration"])) <= 1.0
+        and int(output_info.get("width", 0)) > 0
+        and int(output_info.get("height", 0)) > 0
+        and (not source_info.get("has_audio") or output_info.get("has_audio"))
+    )
+
+
+def _publish_output(source: Path, destination: Path) -> None:
+    """Copy a final video without ever exposing a partially copied MP4."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.part")
+    try:
+        temporary.unlink(missing_ok=True)
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _redaction_signature(manifest: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """Return render-relevant redactions without detector IDs/evidence noise."""
     signature: list[tuple[Any, ...]] = []
@@ -462,7 +579,7 @@ def batch(
     keep_videos: bool | None = None,
     every: float = 4.0,
 ) -> dict[str, Any]:
-    """Run baseline plus optional transcript hardening for every local video."""
+    """Run a batch and resume completed items after interruption."""
     # ``keep_videos`` is retained as a Python API compatibility alias. The
     # batch retention decision now covers all generated audit artifacts, not
     # only MP4s, because those files can still consume substantial storage.
@@ -475,22 +592,130 @@ def batch(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     videos = discover_videos(input_dir, output_dir)
     transcripts = discover_transcripts(input_dir)
-    results: list[dict[str, Any]] = []
+    settings = _batch_settings(experimental_audio=experimental_audio, every=every)
+    settings["keep_artifacts"] = bool(keep_artifacts)
+    state_path = output_dir / BATCH_STATE_FILENAME
+    previous_state = _load_batch_state(
+        state_path,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        artifacts_dir=artifacts_dir,
+        settings=settings,
+    )
     used_output_keys: set[str] = set()
-
-    for index, video in enumerate(videos, start=1):
+    plans: list[tuple[Path, str, Path | None]] = []
+    for video in videos:
         output_key = video.stem
         suffix = 2
         while output_key.casefold() in used_output_keys:
             output_key = f"{video.stem}-{suffix}"
             suffix += 1
         used_output_keys.add(output_key.casefold())
+        transcript, _ = match_transcript(video, transcripts, video_count=len(videos))
+        plans.append((video, output_key, transcript))
+
+    old_by_source = {
+        item.get("source"): item
+        for item in (previous_state or {}).get("videos", [])
+        if isinstance(item, dict) and item.get("source")
+    }
+    # A completed state is treated as resumable only when a delivery is
+    # missing or malformed; otherwise an explicit repeat keeps old behavior.
+    state_needs_resume = bool(previous_state) and (
+        previous_state.get("status") != "completed"
+        or any(
+            not _output_is_complete(video, output_dir / f"{output_key}.mp4")
+            for video, output_key, _ in plans
+            if old_by_source.get(str(video))
+        )
+    )
+    if state_needs_resume:
+        _status("resuming previous batch from output state")
+    reusable_state = previous_state if state_needs_resume else None
+    state: dict[str, Any] = {
+        "schema_version": BATCH_STATE_SCHEMA_VERSION,
+        "created_at": (previous_state or {}).get("created_at", now()),
+        "updated_at": now(),
+        "status": "running",
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "artifacts_dir": str(artifacts_dir),
+        "settings": settings,
+        "current_source": None,
+        "videos": [],
+    }
+    for video, output_key, transcript in plans:
+        old = old_by_source.get(str(video)) if reusable_state else None
+        same_inputs = bool(old) and (
+            old.get("source_fingerprint") == _file_fingerprint(video)
+            and old.get("transcript") == (str(transcript) if transcript else None)
+            and old.get("transcript_fingerprint") == _file_fingerprint(transcript)
+        )
+        status = "pending"
+        final_output = output_dir / f"{output_key}.mp4"
+        if same_inputs and old.get("status") in {"completed", "running"}:
+            if _output_is_complete(video, final_output):
+                status = "completed"
+        state["videos"].append({
+            "source": str(video),
+            "source_fingerprint": _file_fingerprint(video),
+            "transcript": str(transcript) if transcript else None,
+            "transcript_fingerprint": _file_fingerprint(transcript),
+            "output_key": output_key,
+            "final_output": str(final_output),
+            "status": status,
+            "stage": None,
+            "started_at": old.get("started_at") if same_inputs and old else None,
+            "completed_at": old.get("completed_at") if status == "completed" and old else None,
+            "error": None,
+        })
+    _write_atomic_json(state_path, state)
+
+    def persist_state() -> None:
+        state["updated_at"] = now()
+        _write_atomic_json(state_path, state)
+
+    results: list[dict[str, Any]] = []
+
+    for index, ((video, output_key, planned_transcript), state_entry) in enumerate(
+        zip(plans, state["videos"]), start=1
+    ):
         video_root = artifacts_dir / output_key
         baseline_dir = video_root / "baseline"
         baseline_job = baseline_dir / "job"
         transcript, pairing_warnings = match_transcript(
             video, transcripts, video_count=len(videos)
         )
+        if state_entry.get("status") == "completed":
+            _status(f"batch {index}/{len(videos)}: reusing {video.name}")
+            if not keep_artifacts:
+                _discard_artifact_tree(video_root, artifacts_dir)
+            results.append({
+                "source": str(video),
+                "output_key": output_key,
+                "transcript": str(planned_transcript) if planned_transcript else None,
+                "experimental_audio_redaction": experimental_audio,
+                "warnings": pairing_warnings.copy(),
+                "baseline": {"status": "reused", "rendered": False},
+                "hardened": {
+                    "status": "reused" if planned_transcript else "skipped",
+                    "reason": "resumed completed output" if planned_transcript else "no matching transcript",
+                },
+                "final_output": str((output_dir / f"{output_key}.mp4").resolve()),
+                "render_pass": "resumed",
+                "resumed": True,
+                "status": "completed",
+            })
+            continue
+        state_entry.update({
+            "status": "running",
+            "stage": "baseline-analysis",
+            "started_at": now(),
+            "error": None,
+        })
+        state["current_source"] = str(video)
+        state["current_index"] = index
+        persist_state()
         entry: dict[str, Any] = {
             "source": str(video),
             "output_key": output_key,
@@ -523,6 +748,8 @@ def batch(
                 hardened_dir = video_root / "hardened"
                 hardened_job = hardened_dir / "job"
                 try:
+                    state_entry["stage"] = "transcript-hardening"
+                    persist_state()
                     _status(f"batch {index}/{len(videos)}: hardening {video.name}")
                     harden(
                         baseline_job,
@@ -535,6 +762,8 @@ def batch(
                     # transcript-aware manifest is the final decision, so a
                     # matching baseline MP4 is no longer rendered first and
                     # then replaced by a second full-length encode.
+                    state_entry["stage"] = "rendering"
+                    persist_state()
                     _status("rendering transcript-hardened output (single pass)")
                     hardened_render = render_job(hardened_job, hardened_dir, verify_audio=experimental_audio)
                     entry["hardened"] = {
@@ -558,6 +787,8 @@ def batch(
             if final_source is None:
                 # No transcript was paired, or the transcript pass failed
                 # verification. Encode the baseline exactly once as fallback.
+                state_entry["stage"] = "rendering"
+                persist_state()
                 baseline_render = render_job(baseline_job, baseline_dir, verify_audio=experimental_audio)
                 entry["baseline"] = {
                     "status": "completed" if baseline_render["verify"]["passed"] else "failed",
@@ -576,17 +807,30 @@ def batch(
             # exposing a simple flat final-file contract for batch callers:
             # output_dir/<input-stem>.mp4.
             final_output = output_dir / f"{output_key}.mp4"
-            # A prior per-video failure or an external cleanup process must not
-            # remove the delivery directory for later videos in the batch.
-            final_output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(final_source, final_output)
+            # Publish atomically so a killed copy cannot look like a finished
+            # delivery on the next invocation.
+            state_entry["stage"] = "publishing"
+            persist_state()
+            _publish_output(final_source, final_output)
             entry["final_output"] = str(final_output.resolve())
             entry["status"] = "completed" if entry["baseline"]["status"] == "completed" else "failed"
+            if entry["status"] == "completed":
+                state_entry.update({
+                    "status": "completed",
+                    "stage": None,
+                    "completed_at": now(),
+                    "output_fingerprint": _file_fingerprint(final_output),
+                })
+            else:
+                state_entry["status"] = "failed"
         except Exception as exc:  # one bad recording must not stop the batch
             entry["status"] = "failed"
             entry["error"] = str(exc)
+            state_entry.update({"status": "failed", "stage": "failed", "error": str(exc)[:1000]})
             _status(f"batch {index}/{len(videos)}: failed {video.name}: {exc}")
         finally:
+            state["current_source"] = None if state_entry.get("status") == "completed" else str(video)
+            persist_state()
             if not keep_artifacts:
                 # The flat output has already been copied when processing
                 # succeeds. Remove the complete generated audit tree unless
@@ -594,20 +838,31 @@ def batch(
                 _discard_artifact_tree(video_root, artifacts_dir)
         results.append(entry)
 
+    completed_count = sum(item.get("status") == "completed" for item in results)
+    failed_count = sum(item.get("status") == "failed" for item in results)
+    state["status"] = "completed" if failed_count == 0 else "partial"
+    state["current_source"] = None
+    state["completed_count"] = completed_count
+    state["failed_count"] = failed_count
+    state["finished_at"] = now()
+    persist_state()
+
     report = {
         "schema_version": 1,
         "created_at": now(),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "artifacts_dir": str(artifacts_dir),
+        "batch_state": str(state_path),
+        "resumed": state_needs_resume,
         "experimental_audio_redaction": experimental_audio,
         "experimental_whiteboard": whiteboard_mode_enabled(),
         "keep_artifacts": keep_artifacts,
         # Deprecated report key retained for consumers of older reports.
         "keep_artifact_videos": keep_artifacts,
         "video_count": len(videos),
-        "completed_count": sum(item.get("status") == "completed" for item in results),
-        "failed_count": sum(item.get("status") == "failed" for item in results),
+        "completed_count": completed_count,
+        "failed_count": failed_count,
         "results": results,
         "warnings": ["no supported videos found"] if not videos else [],
     }
@@ -615,8 +870,8 @@ def batch(
     if keep_artifacts:
         write_json(batch_report, report)
     else:
-        # A default batch leaves delivery files only. Remove a report from a
-        # prior default run as well, since it is generated audit data.
+        # A default batch leaves delivery files and the small resumable state
+        # file only. Remove generated audit data from this run.
         try:
             batch_report.unlink()
         except FileNotFoundError:

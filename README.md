@@ -47,6 +47,13 @@ priv-sanitizer -j8 -k
 That retains `artifacts/`; the delivery copy in `outputs_sanitized/` is always
 kept. `-j N` selects FFmpeg/filter threads (default: 8).
 
+Each batch also keeps a small `.priv-sanitizer-batch.json` state file inside
+`outputs_sanitized/`. If the process is interrupted, killed, or leaves a
+missing/invalid delivery file, the next matching batch invocation resumes the
+unfinished items and reuses completed deliveries. Changing the input folder,
+output folder, transcript/settings, or sampling options starts a fresh batch
+state instead of mixing jobs.
+
 ## Common use
 
 Process a selected folder:
@@ -162,6 +169,7 @@ The most useful files are:
 - `job/report.txt` — readable summary.
 - `render.json` — render settings and output verification.
 - `artifacts/batch-report.json` — status of every batch item.
+- `outputs_sanitized/.priv-sanitizer-batch.json` — resumable batch state.
 
 A transcript-hardened render uses a `hardened/` directory; otherwise it uses
 `baseline/`. In either case, deliver only the flat file in

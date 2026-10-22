@@ -37,7 +37,7 @@ tool_root="${PRIV_SANITIZER_ROOT:-$PWD}"
 video_dir="${VIDEO_DIR:-$PWD}"
 cd "$video_dir"
 "$tool_root/priv-sanitizer"
-# equivalent: python3 -m priv_sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts
+# equivalent: python3 -m priv_sanitizer batch -j 8 -b 30% --input . --output ./outputs_sanitized --artifacts ./artifacts
 ```
 
 Each recording gets a flat final file at
@@ -47,6 +47,12 @@ to retain manifests, reports, and audit videos for debugging. The legacy
 `--keep-videos` spelling remains an alias. Same-stem DOCX/SRT/VTT files are
 paired automatically; a transcript is never required for baseline processing
 and is not rewritten or emitted.
+
+The batch also keeps a small `outputs_sanitized/.priv-sanitizer-batch.json`
+state file. If a process is interrupted or a delivery is missing/invalid, the
+next invocation with matching settings reuses completed videos and resumes the
+unfinished ones. Source/transcript fingerprints and output probing prevent a
+stale or partial MP4 from being mistaken for a completed item.
 
 For a new machine, run `bash scripts/install.sh` once. The installer provisions
 the Python environment, FFmpeg/FFprobe, Tesseract OCR, and OpenCV vision
@@ -84,8 +90,9 @@ and localized feathered masks for whiteboards and arbitrary camera layouts.
 `--balanced` and `--face-padding` tune that localized mode. The single
 `-b`/`--blur-strength` control applies to both renderers and accepts `0`–`1` or
 `0%`–`100%`: `0%` leaves visual regions unchanged and `100%` applies the
-strongest opaque blur. Lower values are weaker review settings; the default is
-`100%`. Older radius/opacity flags remain compatibility-only aliases.
+strongest opaque blur. Lower values are weaker review settings; explicit
+commands default to `100%`, while the no-argument quick batch uses `30%`.
+Older radius/opacity flags remain compatibility-only aliases.
 Missing optional backends are reported as unresolved coverage; they are never
 silently treated as successful detection.
 

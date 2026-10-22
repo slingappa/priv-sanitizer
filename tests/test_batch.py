@@ -269,3 +269,56 @@ def test_batch_runs_both_passes_and_writes_report(tmp_path):
     # manifest; the failed recording never reaches rendering.
     assert render.call_count == 1
     assert not (tmp_path / "artifacts").exists()
+
+
+def test_batch_persists_state_and_resumes_after_interrupt(tmp_path):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"source-one")
+    second.write_bytes(b"source-two")
+    calls = []
+    interrupt_once = True
+
+    def fake_baseline(video: Path, job: Path, **kwargs):
+        nonlocal interrupt_once
+        calls.append(("baseline", video.name))
+        if video.name == "second.mp4" and interrupt_once:
+            interrupt_once = False
+            raise KeyboardInterrupt
+        job.mkdir(parents=True, exist_ok=True)
+
+    def fake_render(job: Path, output_dir: Path, **kwargs):
+        calls.append(("render", job.parent.parent.name))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "sanitized.mp4").write_bytes(b"complete-output")
+        return {"verify": {"passed": True}}
+
+    with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
+        pipeline, "render_job", side_effect=fake_render
+    ):
+        try:
+            pipeline.batch(tmp_path, tmp_path / "outputs_sanitized", keep_artifacts=True)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the synthetic interruption did not propagate")
+
+    state_path = tmp_path / "outputs_sanitized" / pipeline.BATCH_STATE_FILENAME
+    interrupted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert interrupted["status"] == "running"
+    assert [item["status"] for item in interrupted["videos"]] == ["completed", "running"]
+    assert (tmp_path / "outputs_sanitized" / "first.mp4").exists()
+
+    calls.clear()
+    with patch.object(pipeline, "baseline", side_effect=fake_baseline), patch.object(
+        pipeline, "render_job", side_effect=fake_render
+    ), patch.object(pipeline, "_output_is_complete", side_effect=lambda source, output: output.exists()):
+        report = pipeline.batch(tmp_path, tmp_path / "outputs_sanitized", keep_artifacts=True)
+
+    assert report["resumed"] is True
+    assert report["completed_count"] == 2
+    assert [name for kind, name in calls if kind == "baseline"] == ["second.mp4"]
+    completed = json.loads(state_path.read_text(encoding="utf-8"))
+    assert completed["status"] == "completed"
+    assert all(item["status"] == "completed" for item in completed["videos"])
+    assert report["results"][0]["resumed"] is True

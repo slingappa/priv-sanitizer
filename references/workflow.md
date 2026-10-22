@@ -26,7 +26,7 @@ With no command arguments, the launcher scans only the current directory and
 is equivalent to:
 
 ```bash
-priv-sanitizer batch --input . --output ./outputs_sanitized --artifacts ./artifacts
+priv-sanitizer batch -j 8 -b 30% --input . --output ./outputs_sanitized --artifacts ./artifacts
 ```
 
 Every video gets a baseline pass. A same-stem `.docx`, `.srt`, or `.vtt`
@@ -37,6 +37,12 @@ debugging (`--keep-videos` is a compatibility alias). When a transcript is
 paired, baseline and hardening analysis finish before one final
 transcript-aware render; the baseline render is only a fallback if hardening
 fails.
+
+Batch progress is checkpointed in
+`outputs_sanitized/.priv-sanitizer-batch.json`. If the process is killed or a
+delivery is partial, rerunning the same batch resumes completed and unfinished
+items instead of starting every video over. A changed input, transcript, or
+render setting starts a new state rather than mixing incompatible outputs.
 
 The baseline uses the stable coarse layout/OCR/Haar path plus the established
 scene-change triggers. The experimental physical-camera/whiteboard path is
