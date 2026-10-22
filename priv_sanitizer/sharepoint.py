@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,12 @@ def _path_url(parts: list[str]) -> str:
     return "/".join(quote(part, safe="") for part in parts)
 
 
+def _share_id(url: str) -> str:
+    """Encode a SharePoint sharing URL for Graph's ``/shares`` endpoint."""
+    encoded = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"u!{encoded}"
+
+
 @dataclass(frozen=True)
 class SharePointFolder:
     url: str
@@ -90,12 +97,16 @@ class SharePointClient:
             parsed.scheme.lower() != "https"
             or not parsed.netloc
             or not parsed.path
-            or parsed.query
-            or parsed.fragment
         ):
             raise ToolError("--sharepoint-dir must be an HTTPS SharePoint folder URL")
-        self.folder_url = folder_url.rstrip("/")
-        self._folder = self._resolve_folder(parsed)
+        self.folder_url = folder_url
+        if parsed.path.lower().startswith("/:f:/"):
+            self._folder = self._resolve_share_link(folder_url)
+        else:
+            if parsed.query or parsed.fragment:
+                raise ToolError("--sharepoint-dir must be a folder URL, not a SharePoint page URL")
+            self.folder_url = folder_url.rstrip("/")
+            self._folder = self._resolve_folder(parsed)
         self._upload_folder_id: str | None = None
 
     @property
@@ -202,6 +213,26 @@ class SharePointClient:
             drive_id=drive_id,
             item_id=str(item["id"]),
             drive_name=str(drive.get("name", library_name)),
+        )
+
+    def _resolve_share_link(self, url: str) -> SharePointFolder:
+        share_url = f"{GRAPH_API_BASE}/shares/{quote(_share_id(url), safe='!')}/driveItem"
+        payload = self._json("GET", share_url)
+        item = payload.get("remoteItem")
+        if not isinstance(item, dict):
+            item = payload
+        parent = item.get("parentReference") or payload.get("parentReference") or {}
+        drive_id = parent.get("driveId")
+        item_id = item.get("id")
+        if not drive_id or not item_id:
+            raise ToolError("Microsoft Graph did not return a drive/folder id for the SharePoint sharing link")
+        if "folder" not in item and "folder" not in payload:
+            raise ToolError("--sharepoint-dir sharing link does not resolve to a SharePoint folder")
+        return SharePointFolder(
+            url=url,
+            drive_id=str(drive_id),
+            item_id=str(item_id),
+            drive_name=str(parent.get("driveName") or "SharePoint"),
         )
 
     def _paged_values(self, url: str) -> list[dict[str, Any]]:

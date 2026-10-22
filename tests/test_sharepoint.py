@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from priv_sanitizer.sharepoint import SharePointClient, SharePointFolder
+from priv_sanitizer.sharepoint import SharePointClient, SharePointFolder, _share_id
 
 
 def _client_without_resolution():
@@ -46,6 +46,30 @@ def test_sharepoint_folder_url_resolves_site_drive_and_folder():
     assert folder.item_id == "recordings-id"
     assert "/sites/tenant.sharepoint.com:/teams/site" in calls[0][1]
     assert "/drives/drive-id/root:/Recordings:" in calls[2][1]
+
+
+def test_sharepoint_sharing_link_resolves_remote_folder():
+    url = "https://tenant.sharepoint.com/:f:/r/teams/site/Shared%20Documents/Recordings?d=abc&csf=1"
+    payload = {
+        "remoteItem": {
+            "id": "shared-folder-id",
+            "parentReference": {"driveId": "shared-drive-id"},
+            "folder": {"childCount": 2},
+        }
+    }
+    client = object.__new__(SharePointClient)
+    client.folder_url = url
+    with patch.object(client, "_json", return_value=payload) as request:
+        folder = client._resolve_share_link(url)
+
+    assert folder.drive_id == "shared-drive-id"
+    assert folder.item_id == "shared-folder-id"
+    request.assert_called_once_with(
+        "GET",
+        "https://graph.microsoft.com/v1.0/shares/"
+        + _share_id(url)
+        + "/driveItem",
+    )
 
 
 def test_sharepoint_download_streams_to_atomic_destination(tmp_path):
