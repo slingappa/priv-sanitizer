@@ -12,6 +12,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Iterable
 
 
@@ -1063,7 +1064,8 @@ def _select_ocr_entries(
 
 
 def detect_layout_regions(
-    frame_paths: Iterable[Path], duration: float, width: int, height: int
+    frame_paths: Iterable[Path], duration: float, width: int, height: int,
+    *, progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
     """Classify participant panels per sample, never as one global rail."""
     samples = list(frame_paths)
@@ -1076,12 +1078,17 @@ def detect_layout_regions(
         "protected_shared_content": None,
     }
     if not samples:
+        if progress is not None:
+            progress(100.0)
         return [], ["no frames were available for layout analysis"], evidence
     dark_hits = 0
     luma_samples: list[dict[str, float]] = []
-    entries = _sample_entries(samples, duration)
+    entries = list(_sample_entries(samples, duration))
     rail_regions: list[dict[str, Any]] = []
-    for path, timestamp, start, end in entries:
+    if progress is not None:
+        progress(0.0)
+    total_entries = len(entries)
+    for entry_index, (path, timestamp, start, end) in enumerate(entries, 1):
         left, right = _mean_luma_right_strip(path)
         luma_samples.append({"left": round(left, 2), "right": round(right, 2)})
         if _frame_has_right_rail(path):
@@ -1097,6 +1104,8 @@ def detect_layout_regions(
                 "sources": ["local-layout-v2", "right_panel_luma"],
                 "review_required": True,
             })
+        if progress is not None:
+            progress(100.0 if total_entries == 0 else entry_index * 100.0 / total_entries)
     ratio = dark_hits / len(samples)
     evidence["right_panel_ratio"] = round(ratio, 3)
     evidence["luma_samples"] = luma_samples[:12]
@@ -1111,6 +1120,8 @@ def detect_layout_regions(
         evidence["protected_shared_content"] = [0.0, 0.0, 0.75, 1.0]
     rail_regions = _merge_regions(rail_regions)
     evidence["temporal_region_count"] = len(rail_regions)
+    if progress is not None and not total_entries:
+        progress(100.0)
     return rail_regions, warnings, evidence
 
 
@@ -1123,6 +1134,8 @@ def detect_ocr_regions(
     layout_regions: list[dict[str, Any]],
     known_names: Iterable[str] = (),
     duration: float | None = None,
+    *,
+    progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """OCR participant labels in the active layout, including full-screen views.
 
@@ -1140,6 +1153,8 @@ def detect_ocr_regions(
     if not capability.get("available"):
         evidence["reason"] = capability.get("reason")
         warnings.append(f"OCR unavailable: {capability.get('reason')}; visible names remain review-required")
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     try:
         import pytesseract  # type: ignore
@@ -1148,6 +1163,8 @@ def detect_ocr_regions(
     except ImportError as exc:
         warnings.append(f"OCR unavailable: {exc}")
         evidence["available"] = False
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
 
     names = [name.casefold() for name in known_names]
@@ -1161,7 +1178,11 @@ def detect_ocr_regions(
     # entries are still useful; each frame is treated as one temporal segment.
     if not entries:
         entries = _sample_entries(frames, float(len(frames) * 4.0))
-    for frame, timestamp, segment_start, segment_end in _select_ocr_entries(entries, layout_regions, names):
+    selected_entries = _select_ocr_entries(entries, layout_regions, names)
+    if progress is not None:
+        progress(0.0)
+    total_entries = len(selected_entries)
+    for entry_index, (frame, timestamp, segment_start, segment_end) in enumerate(selected_entries, 1):
         with Image.open(frame) as image:
             image = image.convert("RGB")
             iw, ih = image.size
@@ -1219,6 +1240,8 @@ def detect_ocr_regions(
                         fullscreen_frames[(round(segment_start * 100), round(segment_end * 100))] = (
                             segment_start, segment_end
                         )
+        if progress is not None:
+            progress(100.0 if total_entries == 0 else entry_index * 100.0 / total_entries)
     if not whiteboard_mode_enabled():
         for segment_start, segment_end in fullscreen_frames.values():
             key = (0, 0, 10000, 10000, round(segment_start * 100))
@@ -1237,6 +1260,8 @@ def detect_ocr_regions(
     evidence["detections"] = len(results)
     if not results:
         warnings.append("OCR backend ran but found no confident participant-panel text")
+    if progress is not None and not total_entries:
+        progress(100.0)
     return results, evidence, warnings
 
 
@@ -1496,6 +1521,8 @@ def _non_panel_intervals(
 def _detect_face_regions_legacy(
     frame_paths: Iterable[Path], layout_regions: list[dict[str, Any]], duration: float,
     face_frame_paths: Iterable[Path] | None = None,
+    *,
+    progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """Detect faces for ordinary Meet recordings without assuming one layout.
 
@@ -1517,12 +1544,16 @@ def _detect_face_regions_legacy(
     if not capability.get("available"):
         evidence["reason"] = capability.get("reason")
         warnings.append(f"face detection unavailable: {capability.get('reason')}; participant panel fallback remains active")
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     try:
         import cv2  # type: ignore
     except ImportError as exc:
         warnings.append(f"face detection unavailable: {exc}")
         evidence["available"] = False
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     required = ("CascadeClassifier", "imread", "cvtColor", "data")
     if not all(hasattr(cv2, name) for name in required) or not hasattr(cv2.data, "haarcascades"):
@@ -1530,14 +1561,20 @@ def _detect_face_regions_legacy(
         evidence["available"] = False
         evidence["reason"] = reason
         warnings.append(f"face detection unavailable: {reason}; participant panel fallback remains active")
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     found: dict[tuple[int, ...], dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
     layout_transition_windows: list[tuple[float, float]] = []
     dense_frames = list(face_frame_paths or [])
     scan_frames = dense_frames or list(frame_paths)
+    scan_entries = list(_sample_entries(scan_frames, duration))
+    if progress is not None:
+        progress(0.0)
+    total_scan_entries = len(scan_entries)
     loaded_cascades: dict[str, tuple[Any, bool, int]] = {}
-    for frame, timestamp, segment_start, segment_end in _sample_entries(scan_frames, duration):
+    for frame_index, (frame, timestamp, segment_start, segment_end) in enumerate(scan_entries, 1):
         image = cv2.imread(str(frame))
         if image is None:
             continue
@@ -1662,6 +1699,8 @@ def _detect_face_regions_legacy(
                                 max(0.0, segment_start - 0.25),
                                 min(duration, segment_end + 0.25),
                             ))
+        if progress is not None:
+            progress(100.0 if total_scan_entries == 0 else frame_index * 100.0 / total_scan_entries)
 
     # Remove duplicate cascade proposals for the same face at one timestamp,
     # but retain distinct people even when their boxes are nearby.
@@ -1806,21 +1845,31 @@ def _detect_face_regions_legacy(
     evidence["layout_transition_windows"] = len(layout_transition_windows)
     if not results:
         warnings.append("face detector ran but found no stable participant faces; avatars still rely on panel fallback")
+    if progress is not None and not total_scan_entries:
+        progress(100.0)
     return results, evidence, warnings
 
 
 def detect_face_regions(
     frame_paths: Iterable[Path], layout_regions: list[dict[str, Any]], duration: float,
     face_frame_paths: Iterable[Path] | None = None,
+    *,
+    progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     if not whiteboard_mode_enabled():
-        return _detect_face_regions_legacy(frame_paths, layout_regions, duration, face_frame_paths)
-    return _detect_face_regions_whiteboard(frame_paths, layout_regions, duration, face_frame_paths)
+        return _detect_face_regions_legacy(
+            frame_paths, layout_regions, duration, face_frame_paths, progress=progress
+        )
+    return _detect_face_regions_whiteboard(
+        frame_paths, layout_regions, duration, face_frame_paths, progress=progress
+    )
 
 
 def _detect_face_regions_whiteboard(
     frame_paths: Iterable[Path], layout_regions: list[dict[str, Any]], duration: float,
     face_frame_paths: Iterable[Path] | None = None,
+    *,
+    progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """Detect faces in rails, grids, and arbitrary full-frame camera scenes.
 
@@ -1843,12 +1892,16 @@ def _detect_face_regions_whiteboard(
     if not capability.get("available"):
         evidence["reason"] = capability.get("reason")
         warnings.append(f"face detection unavailable: {capability.get('reason')}; participant panel fallback remains active")
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     try:
         import cv2  # type: ignore
     except ImportError as exc:
         warnings.append(f"face detection unavailable: {exc}")
         evidence["available"] = False
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
     required = ("CascadeClassifier", "imread", "cvtColor", "data")
     if not all(hasattr(cv2, name) for name in required) or not hasattr(cv2.data, "haarcascades"):
@@ -1856,6 +1909,8 @@ def _detect_face_regions_whiteboard(
         evidence["available"] = False
         evidence["reason"] = reason
         warnings.append(f"face detection unavailable: {reason}; participant panel fallback remains active")
+        if progress is not None:
+            progress(100.0)
         return [], evidence, warnings
 
     observations: list[dict[str, Any]] = []
@@ -1867,13 +1922,17 @@ def _detect_face_regions_whiteboard(
     # proxy for face coverage.
     dense_paths = list(face_frame_paths or [])
     entries = _sample_entries(dense_paths, duration) if dense_paths else _sample_entries(frame_paths, duration)
+    entries = list(entries)
+    if progress is not None:
+        progress(0.0)
+    total_entries = len(entries)
     evidence["sampling"] = {
         "source": "dense-face-frames" if dense_paths else "analysis-frames",
         "frame_count": len(entries),
         "fps": dense_face_sampling_fps() if dense_paths else None,
         "selection": "frame-diff+periodic-fallback" if dense_paths else "fixed-analysis-samples",
     }
-    for frame, timestamp, segment_start, segment_end in entries:
+    for frame_index, (frame, timestamp, segment_start, segment_end) in enumerate(entries, 1):
         image = cv2.imread(str(frame))
         if image is None:
             continue
@@ -1961,9 +2020,13 @@ def _detect_face_regions_whiteboard(
                             "raw_height": float(h) / max(dh, 1),
                             "raw_y": float(y0 + y) / max(dh, 1),
                         })
+        if progress is not None:
+            progress(100.0 if total_entries == 0 else frame_index * 100.0 / total_entries)
     evidence["raw_detections"] = len(observations)
     if not observations:
         warnings.append("face detector ran but found no participant-face proposals; review remains required")
+        if progress is not None and not total_entries:
+            progress(100.0)
         return [], evidence, warnings
 
     tracks = _face_tracks(observations)
@@ -2089,6 +2152,8 @@ def _detect_face_regions_whiteboard(
     evidence["detections"] = len(results)
     if not results:
         warnings.append("face proposals were unstable; no face blur was emitted and manual review is required")
+    if progress is not None and not total_entries:
+        progress(100.0)
     return results, evidence, warnings
 
 
@@ -2096,14 +2161,33 @@ def detect_visual_regions(
     frame_paths: Iterable[Path], duration: float, width: int, height: int,
     known_names: Iterable[str] = (),
     face_frame_paths: Iterable[Path] | None = None,
-    *, progress: Callable[[int], None] | None = None,
+    *, progress: Callable[[float], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
     """Run layout, OCR, and face detectors and return auditable evidence."""
     if progress is not None:
         progress(0)
     frames = list(frame_paths)
     dense_frames = list(face_frame_paths or [])
-    layout, warnings, layout_evidence = detect_layout_regions(frames, duration, width, height)
+    last_layout_report = -1.0
+
+    def report_layout_progress(value: float) -> None:
+        nonlocal last_layout_report
+        if progress is None:
+            return
+        scaled = max(0.0, min(20.0, float(value) * 0.20))
+        # Layout may inspect thousands of frames. Avoid writing one terminal
+        # line per frame while still exposing meaningful sub-percent movement.
+        if scaled >= 20.0 or scaled - last_layout_report >= 0.25:
+            last_layout_report = scaled
+            progress(scaled)
+
+    layout, warnings, layout_evidence = detect_layout_regions(
+        frames,
+        duration,
+        width,
+        height,
+        progress=report_layout_progress if progress is not None else None,
+    )
     if progress is not None:
         progress(20)
     # Retain the established dark/UI fullscreen-presenter protection. This is
@@ -2139,14 +2223,45 @@ def detect_visual_regions(
     # OCR and face detection are independent and can run concurrently.  The
     # detector libraries may create their own native threads, so keep this
     # fan-out bounded rather than creating one thread per frame.
+    detector_progress = {"ocr": 0.0, "faces": 0.0}
+    detector_progress_lock = Lock()
+    last_detector_report = 20.0
+
+    def update_detector_progress(detector: str, value: float) -> None:
+        with detector_progress_lock:
+            detector_progress[detector] = max(
+                detector_progress[detector], max(0.0, min(100.0, float(value)))
+            )
+
+    def report_detector_progress(*, force: bool = False) -> None:
+        nonlocal last_detector_report
+        if progress is None:
+            return
+        with detector_progress_lock:
+            value = 20.0 + 0.40 * detector_progress["ocr"] + 0.40 * detector_progress["faces"]
+        value = max(last_detector_report, min(100.0, value))
+        if force or value > last_detector_report:
+            last_detector_report = value
+            progress(value)
+
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="priv-vision") as pool:
-        ocr_future = pool.submit(detect_ocr_regions, frames, layout, known_names, duration)
+        ocr_future = pool.submit(
+            detect_ocr_regions,
+            frames,
+            layout,
+            known_names,
+            duration,
+            progress=(lambda value: update_detector_progress("ocr", value))
+            if progress is not None else None,
+        )
         face_future = pool.submit(
             detect_face_regions,
             frames,
             layout,
             duration,
             dense_frames or None,
+            progress=(lambda value: update_detector_progress("faces", value))
+            if progress is not None else None,
         )
         futures = {ocr_future: "ocr", face_future: "faces"}
         completed: set[str] = set()
@@ -2170,12 +2285,7 @@ def detect_visual_regions(
             else:
                 nonlocal_faces[0], nonlocal_faces[1], nonlocal_faces[2] = result
             completed.add(detector)
-            if progress is not None:
-                # Layout accounts for the first 20%; OCR and face analysis
-                # each account for the next milestones. Whichever worker
-                # finishes first moves the stage to 60%; final coalescing and
-                # evidence assembly are reported as 100% below.
-                progress(60 if len(completed) == 1 else 90)
+            update_detector_progress(detector, 100.0)
 
         nonlocal_ocr: list[Any] = [[], {}, []]
         nonlocal_faces: list[Any] = [[], {}, []]
@@ -2188,12 +2298,15 @@ def detect_visual_regions(
             while pending:
                 done, pending = wait(pending, timeout=poll_interval)
                 if not done:
-                    # Keep the percentage stable while advancing the spinner;
-                    # this is especially useful when Tesseract is slow.
-                    progress(20 + 40 * len(completed))
+                    # Detector callbacks update shared state from worker
+                    # threads; report it here so terminal rendering remains
+                    # serialized and the spinner still advances at a stable
+                    # percentage when a single frame takes a long time.
+                    report_detector_progress(force=True)
                     continue
                 for future in done:
                     collect(future, futures[future])
+                    report_detector_progress(force=True)
         ocr, ocr_evidence, ocr_warnings = nonlocal_ocr
         faces, face_evidence, face_warnings = nonlocal_faces
     # Coarse layout timestamps are midpoints between 4-second samples and can
@@ -2340,6 +2453,16 @@ def _enable(interval: dict[str, Any]) -> str:
     return f"between(t,{float(interval['start']):.3f},{float(interval['end']):.3f})"
 
 
+def _is_full_frame_visual(region: dict[str, Any]) -> bool:
+    """Return whether a visual redaction covers the complete video frame."""
+    if region.get("mode", "blur") != "blur":
+        return False
+    box = [float(value) for value in region.get("box", [])]
+    return len(box) == 4 and all(abs(value - expected) <= 1e-4 for value, expected in zip(
+        box, (0.0, 0.0, 1.0, 1.0)
+    ))
+
+
 def _blur_filter_graph_legacy(
     visual: list[dict[str, Any]], *, blur_radius: int | None = None,
     blur_opacity: float | None = None,
@@ -2357,9 +2480,41 @@ def _blur_filter_graph_legacy(
             0.0, min(1.0, float(blur_opacity))
         )
     safe_chroma_radius = "max(0\\,min(10\\,min(w\\,h)/4-1))"
+    if blur_strength is not None and float(blur_strength) <= 0.0:
+        return "[0:v]null[vout]", "[vout]"
+    if opacity <= 0.0:
+        return "[0:v]null[vout]", "[vout]"
+
+    # Full-frame presenter/avatar intervals used to create one full-resolution
+    # boxblur branch per interval.  On long recordings this made a chain of
+    # repeated split/crop/blur/overlay stages, even when only a few hundred
+    # seconds actually needed masking.  Share one quarter-resolution blur
+    # branch for all full-frame intervals; scaling back once preserves the
+    # strong privacy effect while avoiding repeated full-frame blur passes.
+    full_frame = [item for item in visual if _is_full_frame_visual(item)]
     current = "0:v"
     filters: list[str] = []
+    if full_frame:
+        full_enable = "+".join(_enable(item) for item in full_frame)
+        low_radius = max(1, round(radius / 4))
+        full_alpha = ""
+        if opacity < 1.0:
+            full_alpha = f",format=rgba,colorchannelmixer=aa={opacity:.6f}"
+        filters.extend([
+            "[0:v]split=2[fullbase][fullsrc]",
+            "[fullsrc]scale=iw/4:ih/4:flags=area,"
+            f"boxblur=luma_radius=min({low_radius}\\,min(w\\,h)/2-1):luma_power=2:"
+            f"chroma_radius={safe_chroma_radius}:chroma_power=2:enable='{full_enable}',"
+            f"scale=4*iw:4*ih:flags=bilinear{full_alpha}[fullblur]",
+        ])
+        filters.append(
+            f"[fullbase][fullblur]overlay=x=0:y=0:enable='{full_enable}'[vfull]"
+        )
+        current = "vfull"
+
     for index, item in enumerate(visual):
+        if _is_full_frame_visual(item):
+            continue
         x, y, w, h = [float(value) for value in item["box"]]
         enable = _enable(item)
         mode = item.get("mode", "blur")
@@ -2370,13 +2525,9 @@ def _blur_filter_graph_legacy(
             )
             current = next_label
             continue
-        if blur_strength is not None and float(blur_strength) <= 0.0:
-            continue
         # A zero opacity is an explicit no-blur request.  Do not run a
         # transparent crop/overlay graph: leaving the source untouched is
         # faster and makes the 0% contract exact.
-        if opacity <= 0.0:
-            continue
         base, roi, blurred, next_label = (f"b{index}", f"r{index}", f"z{index}", f"v{index}")
         filters.append(f"[{current}]split=2[{base}][{roi}]")
         alpha = ""

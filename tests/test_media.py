@@ -122,6 +122,20 @@ def test_normal_blur_graph_default_remains_opaque(monkeypatch):
     assert "colorchannelmixer" not in graph
 
 
+def test_normal_fullscreen_regions_share_downsampled_blur_branch(monkeypatch):
+    monkeypatch.delenv("PRIV_SANITIZER_WHITEBOARD", raising=False)
+    visual = [
+        {"kind": "participant_fullscreen", "mode": "blur", "box": [0, 0, 1, 1], "start": 0, "end": 2},
+        {"kind": "participant_fullscreen", "mode": "blur", "box": [0, 0, 1, 1], "start": 4, "end": 6},
+        {"kind": "participant_tile", "mode": "blur", "box": [0.75, 0, 0.25, 1], "start": 2, "end": 4},
+    ]
+    graph, _ = _blur_filter_graph(visual, blur_strength=1.0)
+    assert graph.count("[0:v]split=2[fullbase][fullsrc]") == 1
+    assert graph.count("scale=iw/4:ih/4:flags=area") == 1
+    assert graph.count("boxblur") == 2
+    assert "between(t,0.000,2.000)+between(t,4.000,6.000)" in graph
+
+
 def test_blur_graph_accepts_strength_in_whiteboard_mode(monkeypatch):
     monkeypatch.setenv("PRIV_SANITIZER_WHITEBOARD", "1")
     graph, _ = _blur_filter_graph(LAYOUT, blur_strength=0.375)
@@ -745,6 +759,42 @@ def test_visual_analysis_reports_progress_milestones():
     assert progress[1] == 20
     assert 60 in progress or 90 in progress
     assert progress[-1] == 100
+
+
+def test_visual_analysis_forwards_fine_detector_progress():
+    detector_progress = {"ocr": [], "faces": []}
+
+    def fake_layout(*args, **kwargs):
+        callback = kwargs.get("progress")
+        if callback is not None:
+            callback(100.0)
+        return [], [], {}
+
+    def fake_ocr(*args, **kwargs):
+        callback = kwargs.get("progress")
+        if callback is not None:
+            detector_progress["ocr"].extend((12.5, 100.0))
+            callback(12.5)
+            callback(100.0)
+        return [], {}, []
+
+    def fake_faces(*args, **kwargs):
+        callback = kwargs.get("progress")
+        if callback is not None:
+            detector_progress["faces"].extend((37.5, 100.0))
+            callback(37.5)
+            callback(100.0)
+        return [], {}, []
+
+    with patch("priv_sanitizer.media.detect_layout_regions", side_effect=fake_layout), patch(
+        "priv_sanitizer.media.detect_ocr_regions", side_effect=fake_ocr
+    ), patch("priv_sanitizer.media.detect_face_regions", side_effect=fake_faces):
+        detect_visual_regions([], 1.0, 1920, 1080, progress=lambda _: None)
+
+    assert detector_progress == {
+        "ocr": [12.5, 100.0],
+        "faces": [37.5, 100.0],
+    }
 
 
 def test_layout_detection_is_temporal_not_global(tmp_path):
